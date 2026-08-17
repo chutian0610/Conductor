@@ -1,7 +1,7 @@
 # Testing & coverage
 
 > **Source of truth:** all `*_test.go` under `server/`.
-> Generated against the post-fake-binary tree (this commit).
+> Generated against the post-scenario-fill tree (this commit).
 
 ## How to run
 
@@ -24,9 +24,10 @@ under test.
 
 ### 1. Pure-Go tests (always run)
 
-Argv construction, MCP rendering, schema validation. Never need a
-CLI on PATH, so they run everywhere (CI, dev laptop without
-Claude/Codex installed, Docker image).
+Argv construction, MCP rendering, schema validation, and the
+helpers that are too small / pure to deserve integration coverage.
+Never need a CLI on PATH, so they run everywhere (CI, dev laptop
+without Claude/Codex installed, Docker image).
 
 | Suite | File | What it covers |
 |---|---|---|
@@ -34,6 +35,7 @@ Claude/Codex installed, Docker image).
 | `TestCodex_BlocklistFiltersCustomArgs`  | `codex_test.go`  | `buildCodexArgs` against `codexBlockedArgs`, including the resume-vs-fresh flag asymmetry. |
 | `TestCodex_McpConfig_*`                | `codex_mcp_test.go` | YAML → JSON → TOML rendering round-trip for the managed-MCP flow. |
 | `TestSchema_*`                         | `configschema/schema_test.go` | `Schema.Parse` / `Validate` / `ToExecOptions` plus validation error shapes. |
+| `TestProviderNeedsInlineSystemPrompt_*` `TestShouldFallbackToFreshSession_*` `TestResumeWithContinuityNotice_*` `TestRunContext_*` | `coverage_test.go` | Small pure helpers in `runtime_config.go` and `resume_fallback.go`. |
 | `TestBinrunner_*`                      | `testbinaries/binrunner/binrunner_test.go` | The shared fake-CLI runner: flag parsing, argv writing, JSONL scenario emission. |
 
 When the live CLIs are missing AND the fake-binary build is skipped,
@@ -56,9 +58,23 @@ end-to-end, without a real Claude/Codex install. See
   out to `go build -tags testbinaries` on demand (~1 s cold, ~0.2 s
   cached), `WriteScript` / `ReadArgv` for the test side.
 - Per-backend suites:
-  - `claude_integration_test.go` — happy path, stdin cancellation,
-    timeout, pause, resume success, resume fallback.
-  - `codex_integration_test.go` — same shape for the codex wire.
+  - `claude_integration_test.go` — 7 scenarios.
+  - `codex_integration_test.go` — 3 scenarios + 3 pure-Go argv
+    tests (co-located because they share the `containsArg` /
+    `hasFlag` helpers).
+
+Scenario matrix (the integration layer, by what each scenario
+proves):
+
+| Scenario | Backend | Proves |
+|---|---|---|
+| `_HappyPath` | both | Full lifecycle end-to-end: system init → assistant → result. Verifies `MessageStatus` pins `session_id` and `MessageText` carries the assistant content. |
+| `_Cancel` | both | `context.Cancel()` propagates through the process group; subprocess dies within ~8 s; result status is `aborted`. |
+| `_Timeout` | both | `opts.Timeout` produces a `timeout` status (or a fast return, both tolerated). |
+| `_WritesStdin` (Claude only) | Claude | `writeClaudeInput` reaches the subprocess: fake's recorded stdin contains the prompt. |
+| `_ControlRequest_AllowsAndForcesForeground` | Claude | `handleClaudeControlRequest` writes a `control_response` to stdin that flips `run_in_background:true → false` and replies `behavior:allow`. |
+| `_ManagedMcpConfig_Lifecycle` | Claude | `writeMcpConfigToTemp` writes the JSON; `--mcp-config <path>` is on argv; `cleanupMcpConfigTemp` (via `pathSepParent`) removes both the file and its parent dir after `Execute` returns. |
+| `_ResumeFallback_OnPermanentSessionLoss` | Claude | Fake emits a `result` with `is_error:true` and the substring "session not found" → `isResumeSessionGone` returns true → the retry loop clears `ResumeSessionID` and re-spawns; second attempt's argv does not carry `--resume thr-prev` anymore. |
 
 These tests run under the normal `go test ./...` flow; no special
 build tag is required to *run* them (the `testbinaries` build tag
@@ -90,52 +106,46 @@ Run again after changes to compare.
 | Package | Coverage |
 |---|---|
 | `conductor/server/cmd/conductor`       | 0.0% — no tests (CLI entry only; behaviour is covered indirectly by the agent suites through `Backend.Execute`) |
-| `conductor/server/internal/agent`      | 72.5% |
+| `conductor/server/internal/agent`      | 77.0% |
 | `conductor/server/internal/agent/testbinaries/binrunner` | 46.4% — the harness's blocking-on-signal and stderr paths are not exercised in-process |
 | `conductor/server/internal/configschema` | 76.9% |
-| **Total statements**                   | **65.7%** |
-
-> The total dropped slightly (66.1% → 65.7%) versus the pre-fake-
-> binary baseline because the new `binrunner` package is itself
-> ~46% covered. The `internal/agent` package — the one that
-> matters — went from 70.8% to 72.5%, and the integration tests
-> cover code paths the unit tests cannot (cancellation, timeout,
-> pause, resume-fallback).
+| **Total statements**                   | **69.1%** |
 
 Per-function highlights (low-coverage functions worth watching):
 
 | Function | File | Coverage | Why it's low |
 |---|---|---|---|
 | `releaseProcessGroup`           | `proc_other.go`            | 0.0% | Non-Windows-only helper; integration tests exercise the surrounding flow but the helper's no-process-group path is unreachable on macOS |
-| `isResumeSessionGone`           | `resume_fallback.go`       | 0.0% | String-match helper; reachable from the integration tests but only on the resume-fallback scenario — currently under one test path |
-| `shouldFallbackToFreshSession`  | `resume_fallback.go`       | 71.4% | First failure path covered by integration tests; permanent-loss branch needs a second scenario |
-| `resumeWithContinuityNotice`    | `resume_fallback.go`       | 80.0% | Integration tests now drive this; one unreachable branch remains (malformed `previous` marker) |
-| `providerNeedsInlineSystemPrompt` | `runtime_config.go`     | 100.0% | Trivially testable; integration test added |
-| `Load`                          | `configschema/schema.go`   | 0.0% | File-loader helper; tests exercise `Parse` directly |
-| `finalizeStreamResult`          | `stream.go`                | 56.0% | Several branches (timeout / cancelled / infra-failure) reachable from integration tests; a few error-shape branches remain |
-| `handleClaudeControlRequest`    | `claude.go`                | 0.0% | Permission-mode `control_request` round-trip; not yet covered by fake scenarios |
-| `writeMcpConfigToTemp` / `cleanupMcpConfigTemp` | `claude.go` | 0.0% | MCP-managed-config temp file lifecycle; needs a scenario where `--strict-mcp-config` is set |
+| `claudeTerminalReasonFailure`   | `claude.go`                | 0.0% | Terminal-reason classification helper; needs a `result` event with `terminal_reason: "max_turns"` or similar |
+| `claudeToolResultHasAsyncLaunch` + array + map variants | `claude.go` | 0.0% each | Async-launch detection; needs a `user` event with `tool_use_result.is_async_launch: true` |
+| `Run`                          | `binrunner.go`             | 0.0% | The runner's `Run` calls `os.Exit` and is only covered by re-exec via the integration tests; in-process tests cover its helpers but not the top-level entrypoint |
+| `drainStdin`                   | `binrunner.go`             | 0.0% | Background drain goroutine; covered indirectly by `_WritesStdin` and `_ControlRequest_*` (which poll the drain file), but `drainStdin` itself is never asserted on directly |
+| `hideAgentWindow`              | `proc_other.go`            | 0.0% | macOS-only; non-Windows build does nothing here |
+| `Load`                         | `configschema/schema.go`   | 0.0% | File-loader helper; tests exercise `Parse` directly |
+| `handleClaudeControlRequest`   | `claude.go`                | 73.7% | Integration test covers the happy path; the JSON-unmarshal-fail branch is unreached |
+| `writeMcpConfigToTemp`         | `claude.go`                | 62.5% | Success path covered; the two `os.WriteFile` / `os.MkdirTemp` error branches need a write-protected `/tmp` to drive |
 
 ## Known gaps
 
-1. **Resume-fallback permanent-loss branch.** `shouldFallbackToFreshSession`
-   has a "session permanently lost" arm that the integration tests
-   do not yet drive. Adding one more scenario (`--script` with a
-   `resume` failure code that returns an empty `session_id`) would
-   lift it to 100%.
-2. **`handleClaudeControlRequest` permission round-trip.** The
-   `permission_mode: "control_request"` flow is in the Claude wire
-   but not yet exercised. A fake scenario that emits a
-   `control_request` event and asserts the resulting `control_response`
-   sent on stdin would cover it.
-3. **Managed-MCP temp-file lifecycle.** `writeMcpConfigToTemp` /
-   `cleanupMcpConfigTemp` are the `--strict-mcp-config` path; they
-   need a scenario that wires `agent.mcp_config` and asserts the
-   temp file is created and cleaned up.
-4. **`releaseProcessGroup` is unreachable on macOS without
+1. **Async-launch tool result handling.** `claudeToolResultHasAsyncLaunch`
+   and its two array/map variants are at 0%. They detect when a
+   Claude `user` event carries an async tool launch and route the
+   result. Adding a `user`-event scenario in `claude_integration_test.go`
+   would close this — but the runtime branch that consumes the
+   detection is also untested, so this needs both a scenario and a
+   review of what conductor does with the result.
+2. **MCP temp-file error branches.** `writeMcpConfigToTemp` has two
+   uncovered error paths (mkdir / writefile failure). Closing them
+   needs a write-protected `TMPDIR` or a fault-injection hook on
+   the test's `McpConfig` payload.
+3. **`releaseProcessGroup` is unreachable on macOS without
    `setpgid`.** A platform-specific test that spawns under a
    custom process group and asserts the helper's signal would close
    the gap; deferred until we have a CI matrix covering Linux.
+4. **cmd/conductor renderer is at 0%.** `renderMessage` /
+   `renderResult` / `emitUsage` / `emitJSON` / `truncate` handle
+   the user-facing CLI output. Pure stdlib output, mostly table-
+   driven golden tests. Worth landing as a V1.x follow-up.
 
 ## Regenerating the report
 
