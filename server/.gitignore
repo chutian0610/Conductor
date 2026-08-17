@@ -1,0 +1,21 @@
+# Build artefacts
+bin/
+dist/
+# Bare built binary (when built at server/conductor via `go build .`)
+/conductor
+
+# Go test/coverage
+*.test
+*.out
+coverage.txt
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Local agent scratch (created by --cwd / temp MCP configs)
+.conductor/
+
+# Orphaned test fixture (compiled binary, not referenced by source)
+fake-codex

@@ -1,0 +1,59 @@
+# Example: a code-review agent that runs on a local git diff.
+#
+# Usage:
+#   cd your-repo
+#   conductor run --config /path/to/this/file.yaml \
+#                 --prompt "Review the staged diff in $(git diff --cached)"
+#
+# Conductor will:
+#   1. spawn `claude -p --output-format stream-json --verbose ...`
+#   2. inject `prompt:` as the system brief (with the skill appended)
+#   3. attach the filesystem MCP server so the agent can read source files
+#   4. stream events to stderr, write final review to stdout
+
+version: 1
+
+agent:
+  name: code-reviewer
+  description: Reads a git diff and posts a code review.
+  backend: claude
+  model: claude-sonnet-4-5
+  thinking: medium
+  cwd: .
+  max_turns: 30
+  timeout: 15m
+
+  prompt: |
+    You are a senior engineer reviewing a code change.
+
+    Focus on:
+      - correctness bugs and race conditions
+      - missing or broken error handling
+      - API/contract regressions
+      - test coverage gaps
+
+    Be terse. Cite file:line for every finding. If the change is clean,
+    say "LGTM" and stop — do not pad the review.
+
+  # Skills are plain-text briefs appended after `prompt:`.
+  skills:
+    - ./skills/code-review-style.md
+
+  # Extra CLI args appended to the `claude` invocation. conductor owns
+  # --model/--output-format/--permission-mode and silently drops any user
+  # attempt to override them; everything else passes through.
+  args: []
+
+  # Environment variables injected into the spawned CLI.
+  env: {}
+
+  # MCP servers to expose. With no servers, claude inherits whatever is
+  # in the user's local ~/.claude.json.
+  mcp:
+    servers:
+      - name: filesystem
+        command: npx
+        args:
+          - -y
+          - "@modelcontextprotocol/server-filesystem"
+          - "."
