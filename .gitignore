@@ -2,3 +2,5 @@ tmp/
 .rtk/
 coverage.*
 .conductor/
+# Claude Code / Codex session memory files (runtime artifacts, not project files).
+**/CLAUDE.md
