@@ -53,6 +53,36 @@ the original YAML-relative path. After validation, `resolvePaths`
 rebases `agent.cwd` and every `agent.skills` entry against the YAML's
 directory.
 
+
+## From YAML to Execute
+
+`conductor run --config foo.yaml` walks the path below before
+spawning the subprocess:
+
+```mermaid
+flowchart LR
+    A[conductor.yaml on disk] --> B[Schema.Load path]
+    B --> C["yaml.Decoder KnownFields true"]
+    C --> D{Valid?}
+    D -- no --> E["Error:<br/>field path + reason"]
+    D -- yes --> F[Schema.resolvePaths baseDir]
+    F --> G["Schema.RuntimeBrief()<br/>prompt: + skills"]
+    F --> H["Schema.TaskPrompt(extraPrompt)<br/>brief + extraPrompt"]
+    G --> J["agent.ExecOptions.SystemPrompt"]
+    J --> K["backend.Execute(ctx, prompt, opts)"]
+    H --> K
+
+    style A fill:#e8f4ff,stroke:#3a6fa8
+    style K fill:#ffe9b3,stroke:#c08000
+```
+
+The brief (`RuntimeBrief`) is split out from the task prompt because
+the backend routes it through the per-workdir context file (Claude
+→ `CLAUDE.md`, Codex → `AGENTS.md`) rather than only into stdin
+— see [ADR-0005](adr/0005-brief-duplicated-disk-and-prompt-v1.md)
+and the "prompt-vs-brief split" in
+[backend.md](backend.md#the-prompt-vs-brief-split).
+
 ## Top-level fields → `agent.ExecOptions`
 
 `Schema.ToExecOptions(extraPrompt, resumeID)` converts the YAML plus

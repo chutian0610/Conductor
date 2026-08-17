@@ -181,5 +181,13 @@ on cancellation via SIGTERM→SIGKILL across the process group.
 - `handleCodexItem` dispatch against the four item types.
 - `codexMcpConfig` round-trip (YAML → TOML → Codex-friendly shape).
 
-Like the Claude suite, the tests use a fake binary (`fake-codex`,
-generated at test-time) so they don't require a real Codex install.
+Tests are split into two layers: pure-Go tests
+(argv construction, scanner dispatch, MCP rendering) run
+unconditionally; `Test*_Live_*` tests run only when the real `claude`
+(or `codex`) CLI is on `$PATH` — they `t.Skip` otherwise. **There is
+no fake-binary harness today**; the `testhelpers_test.go` file only
+provides a logger helper and a temp-file helper. Adding a
+`testdata/fake-claude/main.go` + `testdata/fake-codex/main.go` paired
+with a `*_integration_test.go` per backend is the recommended next
+step to lift `internal/agent` coverage and close the gap between the
+argv unit tests and the actual `Execute()` lifecycle.

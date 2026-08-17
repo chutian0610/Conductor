@@ -173,6 +173,13 @@ short enough that a stuck handler is recovered quickly.
 - Terminal-result classification for each combination of
   `lastAssistantText`, `finalResultText`, `is_error`, and `runCtx.Err()`.
 
-The tests use a fake `claude` binary compiled at test-time
-(`internal/agent/testhelpers_test.go`) so they do not require a real
-Claude Code install.
+Tests are split into two layers: pure-Go tests
+(argv construction, scanner dispatch, MCP rendering) run
+unconditionally; `Test*_Live_*` tests run only when the real `claude`
+(or `codex`) CLI is on `$PATH` — they `t.Skip` otherwise. **There is
+no fake-binary harness today**; the `testhelpers_test.go` file only
+provides a logger helper and a temp-file helper. Adding a
+`testdata/fake-claude/main.go` + `testdata/fake-codex/main.go` paired
+with a `*_integration_test.go` per backend is the recommended next
+step to lift `internal/agent` coverage and close the gap between the
+argv unit tests and the actual `Execute()` lifecycle.

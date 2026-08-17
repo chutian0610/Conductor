@@ -125,6 +125,46 @@ The binary still compiles on Windows (`go build ./cmd/conductor`
 succeeds), but refuses to spawn agents at runtime. Adding real Windows
 support is V2 work.
 
+
+## Process tree and cancellation
+
+`Setpgid = true` puts the spawned CLI and **every** subprocess it
+launches (npm downloads, MCP servers like the filesystem MCP, child
+shells) into one process group, so a single `kill(-pgid, sig)` is
+enough to reach the whole tree:
+
+```mermaid
+graph LR
+    classDef parent fill:#e8f4ff,stroke:#3a6fa8,color:#1a3a6a
+    classDef group fill:#ffe9b3,stroke:#c08000,color:#5a3a00
+    classDef leaf fill:#f4f4f4,stroke:#888,color:#222
+    classDef sigterm fill:#ffd6d6,stroke:#c0392b,color:#7a1f1f
+    classDef sigkill fill:#ffb3b3,stroke:#a00,color:#600
+
+    parent["conductor<br/>(parent, idle ctx)"]:::parent
+    pg["process group<br/>(pgid = child PID)"]:::group
+    claude["claude<br/>PID = pgid"]:::group
+    npm["npx child"]:::leaf
+    mcp["filesystem MCP<br/>PID = pgid"]:::group
+    sh["sh wrapper"]:::leaf
+
+    parent -- SysProcAttr.Setpgid --> pg
+    pg --> claude
+    claude --> npm
+    claude --> mcp
+    mcp --> sh
+
+    sigtermLabel["SIGTERM to -PGID"]:::sigterm
+    sigkillLabel["SIGKILL to -PGID<br/>(after TerminateGrace)"]:::sigkill
+    sigtermLabel -.-> pg
+    sigkillLabel -.-> pg
+```
+
+The leaf nodes (npm, shell) only exist while the parent CLI is
+running — they're spawned on demand and exit when the parent's
+turn completes. Killing the group means no orphan npm download or
+MCP server ever survives a Ctrl-C.
+
 ## Build matrix
 
 | OS      | Architectures        | Status                       |

@@ -179,10 +179,71 @@ Adding a new type means implementing `Backend` and editing this
 └────────────────────────────────────────────────────────────────┘
 ```
 
-### Termination precedence
+#
+## Lifecycle at a glance
+
+The end-to-end path from a CLI invocation to a single `Result` value
+on `Session.Result`:
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant CLI as cmd/conductor
+    participant CS as configschema
+    participant B as agent.Backend
+    participant SP as Spawned LLM CLI
+
+    User->>CLI: conductor run --config foo.yaml --prompt "..."
+    CLI->>CS: Load(path) -> Parse + Validate
+    CS-->>CLI: *Schema (or error)
+    CLI->>CLI: signal.NotifyContext(SIGINT, SIGTERM) -> ctx
+    CLI->>B: agent.New(backend, cfg) -> Backend
+    CLI->>B: Execute(ctx, prompt, opts) -> *Session
+    activate B
+    B->>SP: preflight: write CLAUDE.md / AGENTS.md / config.toml
+    B->>SP: cmd.Start() (SysProcAttr.Setpgid on Unix)
+    B-->>CLI: returns *Session immediately
+    CLI->>B: for msg := range session.Messages { render }
+    Note over CLI,SP: stdout is line-delimited JSON;
+    Note over CLI,SP: stderr is rolled into the 4 KiB tail;
+    Note over CLI,SP: surfaced on non-completed exit
+    CLI->>B: <-session.Result
+    deactivate B
+    B-->>CLI: Result{Status, Output, SessionID, Usage, ...}
+    CLI-->>User: stderr = events, stdout = Result.Output
+```
+
+Both backends follow the same shape; only the preflight target file
+(`CLAUDE.md` for claude, `AGENTS.md` for codex, plus the optional
+`$CODEX_HOME/config.toml`) and the wire-protocol handlers differ.
+
+## Termination precedence
 
 `finalizeStreamResult` (`internal/agent/stream.go`) classifies the run in
 this order — earlier checks win:
+
+The earlier check wins. Visualised:
+
+```mermaid
+flowchart TD
+    A[proc.Wait returns<br/>or context expires] --> B{infra failure?<br/>scanner / stdout / write error}
+    B -- yes --> Z1["Status = failed"]
+    B -- no --> C{runCtx == DeadlineExceeded?}
+    C -- yes --> Z2["Status = timeout"]
+    C -- no --> D{runCtx == Canceled?}
+    D -- yes --> Z3["Status = aborted"]
+    D -- no --> E{terminal event seen?}
+    E -- no --> Z4["Status = failed"]
+    E -- yes --> F{is_error?}
+    F -- yes --> Z5["Status = failed"]
+    F -- no --> Z6["Status = completed"]
+```
+
+The "infra failure" branch and the timeouts are exclusive — a
+subprocess crash after a model finish still classifies the run as
+`failed` (not `aborted`), because `runCtx.Err()` is `nil` at
+that point.
+
 
 1. **Infrastructure failure** — scanner / stdout close / write error →
    `failed`.
