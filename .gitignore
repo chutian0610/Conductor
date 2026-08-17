@@ -1,2 +1,3 @@
 tmp/
 .rtk/
+coverage.*
