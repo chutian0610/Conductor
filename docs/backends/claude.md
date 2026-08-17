@@ -64,6 +64,8 @@ Claude flag is `bypassPermissions` (added unconditionally above).
 
 ## Blocked user flags
 
+See [ADR-0006](../adr/0006-per-backend-blocked-args.md) for the design rationale.
+
 `claudeBlockedArgs` refuses to let `agent.args` override anything
 conductor owns. Blocked entries (and the ones whose value is also
 dropped):

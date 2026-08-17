@@ -60,6 +60,8 @@ in `CustomArgs` is then re-filtered through `codexBlockedArgs`.
 
 ## Blocked user flags
 
+See [ADR-0006](../adr/0006-per-backend-blocked-args.md) for the design rationale.
+
 `codexBlockedArgs` blocks anything that would re-shape the protocol
 or shadow the running mode:
 

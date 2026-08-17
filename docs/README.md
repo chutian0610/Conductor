@@ -20,6 +20,10 @@ docs/
 ├── configuration.md    — conductor.yaml schema reference
 ├── process-model.md    — subprocess, process groups, cancellation,
 │                          Windows refuse-to-run
+├── adr/                 — Architecture Decision Records (the "why" behind
+│                          the V1 design choices — CLI-only, exec-json,
+│                          Windows refusal, strict YAML, brief-routing,
+│                          blocked-args)
 └── backends/
     ├── claude.md       — Claude Code backend details (argv, blocked
     │                      args, MCP, result fields)

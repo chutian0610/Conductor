@@ -283,3 +283,12 @@ See:
 
 - [`backends/claude.md`](backends/claude.md)
 - [`backends/codex.md`](backends/codex.md)
+
+## Design notes (ADR pointers)
+
+- [ADR-0001](adr/0001-v1-cli-only-no-http.md) — V1 ships a CLI only.
+- [ADR-0002](adr/0002-codex-exec-json-not-app-server.md) — `codex exec --json`; no app-server websocket.
+- [ADR-0003](adr/0003-refuse-windows-run-time.md) — process-group machinery is Unix-only.
+- [ADR-0004](adr/0004-strict-yaml-schema.md) — `KnownFields(true)`.
+- [ADR-0005](adr/0005-brief-duplicated-disk-and-prompt-v1.md) — brief travels disk + prompt in V1; V2 splits.
+- [ADR-0006](adr/0006-per-backend-blocked-args.md) — `claudeBlockedArgs` / `codexBlockedArgs`.
