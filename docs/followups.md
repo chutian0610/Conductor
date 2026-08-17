@@ -54,6 +54,11 @@ the ADR owns the rationale.
 | 17 | New top-level YAML sections (`plan:`, `dag:`) | [ADR-0004](adr/0004-strict-yaml-schema.md) |
 | 18 | CI workflow file that runs the integration layer (today the `Makefile` covers it; a GitHub Actions / similar config would make the harness explicit) | implicit — no ADR |
 
+| 19 | Agent layer — persistent registry, runs, events, identity env vars (V1.x refresh: defaults + auto-register) | [docs/agent-layer.md](agent-layer.md) + [ADR-0008](adr/0008-agent-registry-persistence-and-identity.md) (superseded by Update log) | shipped |
+| 20 | Rename `internal/agent` → `internal/backend` so package name matches "backend 层 / agent 层" vocabulary (touch: ~1500 LOC, mostly tests) | this row | — |
+| 21 | Adversarial audit loop: `conductor audit <run-id>` spawns a fresh LLM subprocess to audit a recorded run (multica analogue: `goal_manager.py run_audit`) | [docs/agent-layer.md](agent-layer.md) "Roadmap" | — |
+| 22 | HTTP surface for the registry (V2 transport; ADR-0001 today forbids it) | [ADR-0001](adr/0001-v1-cli-only-no-http.md) | — |
+
 ## Closing a row
 
 When a row is closed:

@@ -10,6 +10,10 @@ as a subprocess and exposes a uniform event stream + terminal result.
 > quick-start (build, run, conductor.yaml shape, verifications).
 > **[followups.md](followups.md)** is the single-page index of every
 > gap and deferred V2 item, with a pointer to the source of truth.
+>
+> **[agent-layer.md](agent-layer.md)** describes the persistent
+> agent registry (`conductor agent ...`) — the V1.x counterpart to
+> multica's `goal_manager.py`.
 
 ## Layout
 
