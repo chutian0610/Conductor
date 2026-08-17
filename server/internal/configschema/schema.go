@@ -7,34 +7,34 @@
 //
 // v0 contract — what every field means:
 //
-//   version    MUST be 1.
-//   agent      The single agent definition this conductor run will use.
-//              Multi-agent dispatch is a V2 concern (DAG / plan layer).
-//   agent.backend   One of agent.IsSupportedType()'s list. Drives which
-//                   Backend implementation handles Execute().
-//   agent.model     Model identifier (passed verbatim to the CLI's
-//                   --model flag). Empty means "let the CLI choose".
-//   agent.thinking  Backend-native effort level ("low|medium|high|...").
-//   agent.cwd       Working directory for the spawned CLI. Relative
-//                   paths resolve against the directory containing
-//                   conductor.yaml.
-//   agent.max_turns 0 = unlimited.
-//   agent.timeout   "30m" / "1h" / "0s" (disable). Empty disables.
-//   agent.prompt    The system brief. Concatenated with anything passed
-//                   via --prompt on the CLI.
-//   agent.skills    List of file/dir paths whose contents are appended
-//                   to agent.prompt, in order. Relative paths resolve
-//                   against the conductor.yaml directory. Skills are
-//                   plain text — conductor does not interpret them.
-//   agent.args      Extra CLI flags appended verbatim. Each backend has
-//                   a blocklist of flags it owns and silently drops any
-//                   it sees here.
-//   agent.env       Extra environment variables for the spawned CLI.
-//                   Overrides inherited values.
-//   agent.mcp.servers   MCP servers to expose. Each entry is forwarded
-//                       to the CLI's --mcp-config. If absent, the CLI
-//                       inherits whatever the user has configured
-//                       locally.
+//	version    MUST be 1.
+//	agent      The single agent definition this conductor run will use.
+//	           Multi-agent dispatch is a V2 concern (DAG / plan layer).
+//	agent.backend   One of agent.IsSupportedType()'s list. Drives which
+//	                Backend implementation handles Execute().
+//	agent.model     Model identifier (passed verbatim to the CLI's
+//	                --model flag). Empty means "let the CLI choose".
+//	agent.thinking  Backend-native effort level ("low|medium|high|...").
+//	agent.cwd       Working directory for the spawned CLI. Relative
+//	                paths resolve against the directory containing
+//	                conductor.yaml.
+//	agent.max_turns 0 = unlimited.
+//	agent.timeout   "30m" / "1h" / "0s" (disable). Empty disables.
+//	agent.prompt    The system brief. Concatenated with anything passed
+//	                via --prompt on the CLI.
+//	agent.skills    List of file/dir paths whose contents are appended
+//	                to agent.prompt, in order. Relative paths resolve
+//	                against the conductor.yaml directory. Skills are
+//	                plain text — conductor does not interpret them.
+//	agent.args      Extra CLI flags appended verbatim. Each backend has
+//	                a blocklist of flags it owns and silently drops any
+//	                it sees here.
+//	agent.env       Extra environment variables for the spawned CLI.
+//	                Overrides inherited values.
+//	agent.mcp.servers   MCP servers to expose. Each entry is forwarded
+//	                    to the CLI's --mcp-config. If absent, the CLI
+//	                    inherits whatever the user has configured
+//	                    locally.
 package configschema
 
 import (
@@ -54,8 +54,8 @@ import (
 
 // Schema is the top-level conductor.yaml document.
 type Schema struct {
-	Version int     `yaml:"version"`
-	Agent   Agent   `yaml:"agent"`
+	Version int   `yaml:"version"`
+	Agent   Agent `yaml:"agent"`
 }
 
 // Agent is the single agent definition.
@@ -314,16 +314,16 @@ func (s *Schema) ToExecOptions(extraPrompt, resumeID string) (agent.ExecOptions,
 	}
 
 	return agent.ExecOptions{
-		Cwd:         s.Agent.Cwd,
-		Model:       s.Agent.Model,
-		SystemPrompt:  brief,
+		Cwd:             s.Agent.Cwd,
+		Model:           s.Agent.Model,
+		SystemPrompt:    brief,
 		ResumeSessionID: resumeID,
-		ThreadName:  s.Agent.Name,
-		MaxTurns:    s.Agent.MaxTurns,
-		Timeout:     timeout,
-		ThinkingLevel: s.Agent.Thinking,
-		CustomArgs:  s.Agent.Args,
-		Env:         s.Agent.Env,
-		McpConfig:   mcpRaw,
+		ThreadName:      s.Agent.Name,
+		MaxTurns:        s.Agent.MaxTurns,
+		Timeout:         timeout,
+		ThinkingLevel:   s.Agent.Thinking,
+		CustomArgs:      s.Agent.Args,
+		Env:             s.Agent.Env,
+		McpConfig:       mcpRaw,
 	}, nil
 }

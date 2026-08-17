@@ -19,16 +19,16 @@ import (
 //
 // Wire protocol (line-delimited JSON on stdout):
 //
-//   {"type":"thread.started","thread_id":"..."}            — session banner
-//   {"type":"turn.started"}                                — turn begins
-//   {"type":"item.started","item":{...}}                   — item starts
-//     item.type = "agent_message"      → MessageText
-//     item.type = "reasoning"          → MessageThinking
-//     item.type = "command_execution"  → MessageToolUse {Tool: "Bash", CallID}
-//     item.type = "error"              → MessageError
-//   {"type":"item.completed","item":{...}}                 — item finished
-//     item.type = "command_execution"  → MessageToolResult {CallID, Output}
-//   {"type":"turn.completed","usage":{...}}                — terminal
+//	{"type":"thread.started","thread_id":"..."}            — session banner
+//	{"type":"turn.started"}                                — turn begins
+//	{"type":"item.started","item":{...}}                   — item starts
+//	  item.type = "agent_message"      → MessageText
+//	  item.type = "reasoning"          → MessageThinking
+//	  item.type = "command_execution"  → MessageToolUse {Tool: "Bash", CallID}
+//	  item.type = "error"              → MessageError
+//	{"type":"item.completed","item":{...}}                 — item finished
+//	  item.type = "command_execution"  → MessageToolResult {CallID, Output}
+//	{"type":"turn.completed","usage":{...}}                — terminal
 //
 // Approval policy: --approve-for-me routes any tool permission requests
 // through automatic review (workspace-write sandbox). Combined with
@@ -38,7 +38,8 @@ import (
 //
 // V1.1 scope: single attempt, no resume, no MCP, no retries.
 // V1.2 added:   resume subcommand + model override (-m) + auto-fallback
-//               on permanent session loss, reasoning items → MessageThinking.
+//
+//	on permanent session loss, reasoning items → MessageThinking.
 //
 // The protocol is structurally identical to Claude's stream-json, so
 // codex.go mirrors claude.go's structure almost line-for-line. The big
@@ -311,17 +312,19 @@ func (b *codexBackend) runOneAttempt(
 // (or `codex exec resume --json` when ResumeSessionID is set).
 //
 // Fresh-exec flag surface:
-//   --json                       : line-delimited JSON on stdout
-//   --approve-for-me             : auto-approve via workspace-write sandbox
-//   -C <dir>                     : working directory
-//   -m <model>                   : model selection
-//   -c model_reasoning_effort=X  : thinking effort (when ThinkingLevel set)
+//
+//	--json                       : line-delimited JSON on stdout
+//	--approve-for-me             : auto-approve via workspace-write sandbox
+//	-C <dir>                     : working directory
+//	-m <model>                   : model selection
+//	-c model_reasoning_effort=X  : thinking effort (when ThinkingLevel set)
 //
 // Resume subcommand (`codex exec resume --json <id> "prompt"`):
-//   -m <model>                   : allowed, overrides session's model
-//   -c model_reasoning_effort=X  : allowed, per-turn config override
-//   -C <dir>                     : REJECTED ("unexpected argument") — uses original session's cwd
-//   --approve-for-me             : REJECTED — uses original session's approval policy
+//
+//	-m <model>                   : allowed, overrides session's model
+//	-c model_reasoning_effort=X  : allowed, per-turn config override
+//	-C <dir>                     : REJECTED ("unexpected argument") — uses original session's cwd
+//	--approve-for-me             : REJECTED — uses original session's approval policy
 //
 // V1.2 candidates (not implemented): sandbox override, --oss, --profile.
 func buildCodexArgs(opts ExecOptions) []string {
@@ -357,28 +360,28 @@ func buildCodexArgs(opts ExecOptions) []string {
 }
 
 var codexBlockedArgs = map[string]struct{}{
-	"exec":                              {},
-	"resume":                            {},
-	"--json":                            {},
-	"--approve-for-me":                  {},
+	"exec":             {},
+	"resume":           {},
+	"--json":           {},
+	"--approve-for-me": {},
 	"--dangerously-bypass-approvals-and-sandbox": {},
-	"-m":                                {},
-	"--model":                           {},
-	"-C":                                {},
-	"--cd":                              {},
-	"-s":                                {},
-	"--sandbox":                         {},
-	"-c":                                {},
-	"--config":                          {},
-	"--oss":                             {},
-	"--local-provider":                  {},
-	"-p":                                {},
-	"--profile":                         {},
-	"--dangerously-bypass-hook-trust":   {},
-	"--skip-git-repo-check":             {},
-	"--ephemeral":                       {},
-	"--ignore-user-config":              {},
-	"--ignore-rules":                    {},
+	"-m":                              {},
+	"--model":                         {},
+	"-C":                              {},
+	"--cd":                            {},
+	"-s":                              {},
+	"--sandbox":                       {},
+	"-c":                              {},
+	"--config":                        {},
+	"--oss":                           {},
+	"--local-provider":                {},
+	"-p":                              {},
+	"--profile":                       {},
+	"--dangerously-bypass-hook-trust": {},
+	"--skip-git-repo-check":           {},
+	"--ephemeral":                     {},
+	"--ignore-user-config":            {},
+	"--ignore-rules":                  {},
 }
 
 func codexFilterCustomArgs(userArgs []string) []string {
@@ -411,11 +414,11 @@ type codexEvent struct {
 }
 
 type codexUsage struct {
-	InputTokens            int64 `json:"input_tokens"`
-	CachedInputTokens      int64 `json:"cached_input_tokens"`
-	CacheWriteInputTokens  int64 `json:"cache_write_input_tokens"`
-	OutputTokens           int64 `json:"output_tokens"`
-	ReasoningOutputTokens  int64 `json:"reasoning_output_tokens,omitempty"`
+	InputTokens           int64 `json:"input_tokens"`
+	CachedInputTokens     int64 `json:"cached_input_tokens"`
+	CacheWriteInputTokens int64 `json:"cache_write_input_tokens"`
+	OutputTokens          int64 `json:"output_tokens"`
+	ReasoningOutputTokens int64 `json:"reasoning_output_tokens,omitempty"`
 }
 
 type codexItem struct {

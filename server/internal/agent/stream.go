@@ -3,12 +3,12 @@ package agent
 import (
 	"bufio"
 	"context"
-	"time"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os/exec"
+	"time"
 )
 
 // agentStreamMaxLineBytes bounds a single line read from an agent CLI's

@@ -20,12 +20,12 @@ import (
 //
 // Event types:
 //
-//   {"type":"system",...}              — session banner (carries session_id)
-//   {"type":"assistant",...}           — text / thinking / tool_use blocks
-//   {"type":"user",...}                — tool_result blocks
-//   {"type":"log",...}                 — structured log line
-//   {"type":"control_request",...}     — permission / hook prompt (auto-allow)
-//   {"type":"result",...}              — terminal: result text + usage
+//	{"type":"system",...}              — session banner (carries session_id)
+//	{"type":"assistant",...}           — text / thinking / tool_use blocks
+//	{"type":"user",...}                — tool_result blocks
+//	{"type":"log",...}                 — structured log line
+//	{"type":"control_request",...}     — permission / hook prompt (auto-allow)
+//	{"type":"result",...}              — terminal: result text + usage
 //
 // The session id comes from the "system" event's session_id field.
 // Approval policy: --permission-mode bypassPermissions makes claude
@@ -313,8 +313,6 @@ func (b *claudeBackend) runOneAttempt(
 	}
 }
 
-
-
 // ── Claude CLI argument construction ───────────────────────────────────────
 
 // buildClaudeArgs assembles the argv passed to the Claude CLI. Backends
@@ -355,19 +353,19 @@ func buildClaudeArgs(opts ExecOptions) []string {
 }
 
 var claudeBlockedArgs = map[string]struct{}{
-	"-p":                                {},
-	"--output-format":                   {},
-	"--input-format":                    {},
-	"--permission-mode":                 {},
-	"--strict-mcp-config":               {},
-	"--model":                           {},
-	"--max-turns":                       {},
-	"--mcp-config":                      {},
-	"--session-name":                    {},
-	"--resume":                          {},
-	"--continue":                        {},
-	"--dangerously-skip-permissions":    {},
-	"-r":                                {},
+	"-p":                             {},
+	"--output-format":                {},
+	"--input-format":                 {},
+	"--permission-mode":              {},
+	"--strict-mcp-config":            {},
+	"--model":                        {},
+	"--max-turns":                    {},
+	"--mcp-config":                   {},
+	"--session-name":                 {},
+	"--resume":                       {},
+	"--continue":                     {},
+	"--dangerously-skip-permissions": {},
+	"-r":                             {},
 }
 
 func filterCustomArgs(userArgs []string) []string {
@@ -408,13 +406,13 @@ type claudeSDKMessage struct {
 	Model     string          `json:"model,omitempty"`
 
 	// result fields
-	ResultText      string                            `json:"result,omitempty"`
-	IsError         bool                              `json:"is_error,omitempty"`
-	TerminalReason  string                            `json:"terminal_reason,omitempty"`
-	DurationMs      float64                           `json:"duration_ms,omitempty"`
-	NumTurns        int                               `json:"num_turns,omitempty"`
-	Usage           *claudeUsage                      `json:"usage,omitempty"`
-	ModelUsage      map[string]claudeResultModelUsage `json:"modelUsage,omitempty"`
+	ResultText     string                            `json:"result,omitempty"`
+	IsError        bool                              `json:"is_error,omitempty"`
+	TerminalReason string                            `json:"terminal_reason,omitempty"`
+	DurationMs     float64                           `json:"duration_ms,omitempty"`
+	NumTurns       int                               `json:"num_turns,omitempty"`
+	Usage          *claudeUsage                      `json:"usage,omitempty"`
+	ModelUsage     map[string]claudeResultModelUsage `json:"modelUsage,omitempty"`
 
 	// log fields
 	Log *claudeLogEntry `json:"log,omitempty"`

@@ -4,8 +4,8 @@
 //
 // V1 subcommands:
 //
-//   conductor run --config <agent.yaml> [--prompt "<extra>"]
-//     Run the agent once. Streams events to stderr; final result to stdout.
+//	conductor run --config <agent.yaml> [--prompt "<extra>"]
+//	  Run the agent once. Streams events to stderr; final result to stdout.
 //
 // V2 will add: conductor plan / conductor attach / conductor status.
 package main
@@ -46,7 +46,7 @@ func root() *cobra.Command {
 
 func runCmd() *cobra.Command {
 	var (
-		configPath string
+		configPath  string
 		extraPrompt string
 		resumeID    string
 		streamJSON  bool

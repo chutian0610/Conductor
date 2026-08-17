@@ -181,10 +181,10 @@ func renderCodexMcpServersBlock(raw json.RawMessage) (string, bool, error) {
 // normalizeCodexMcpServer rewrites the conductor-side MCP server shape
 // into codex's config.toml shape. Two transports today:
 //
-//   stdio:  {command, args, env, cwd?}          → pass through (drop selector keys)
-//   http:   {url, headers?, type?}              → rename headers → http_headers,
-//                                                drop `type`, force
-//                                                experimental_use_rmcp_client = true
+//	stdio:  {command, args, env, cwd?}          → pass through (drop selector keys)
+//	http:   {url, headers?, type?}              → rename headers → http_headers,
+//	                                             drop `type`, force
+//	                                             experimental_use_rmcp_client = true
 //
 // `tools`/`prompts`/`resources` are conductor UI selector keys, not
 // protocol-level — they are dropped here so they don't confuse codex when

@@ -36,7 +36,7 @@ func runLiveClaude(t *testing.T, execPath, prompt string, opts ExecOptions, ctx 
 	t.Helper()
 	backend, err := New("claude", Config{
 		ExecutablePath: execPath,
-		Logger:        testLogger(t),
+		Logger:         testLogger(t),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

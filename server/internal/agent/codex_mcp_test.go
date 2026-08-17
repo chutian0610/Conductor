@@ -50,11 +50,11 @@ func TestJsonValueToCodexTOMLInline_StringEscaping(t *testing.T) {
 	cases := []struct {
 		in, want string
 	}{
-		{`a\b`, `"a\\b"`},   // raw backslash
-		{`a"b`,  `"a\"b"`},  // raw double-quote
+		{`a\b`, `"a\\b"`},    // raw backslash
+		{`a"b`, `"a\"b"`},    // raw double-quote
 		{"a\nb", `"a\nb"`},   // real newline
-		{`a	b`,  `"a\tb"`},   // raw tab
-		{"plain", `"plain"`},   // no specials
+		{`a	b`, `"a\tb"`},    // raw tab
+		{"plain", `"plain"`}, // no specials
 	}
 	for _, c := range cases {
 		got, err := jsonValueToCodexTOMLInline(c.in)
