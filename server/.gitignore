@@ -19,3 +19,6 @@ coverage.txt
 
 # Orphaned test fixture (compiled binary, not referenced by source)
 fake-codex
+
+# Coverage artefacts (run `make test-cover` to regenerate)
+coverage.*
