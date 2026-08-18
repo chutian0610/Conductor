@@ -285,6 +285,23 @@ func (s *Server) handleRunSubrouter(w http.ResponseWriter, r *http.Request) {
 		s.handleRunResult(w, r, id)
 	case "stream":
 		s.handleRunStream(w, r, id)
+	case "audit":
+		// GET /v1/runs/{id}/audit and POST /v1/runs/{id}/audit:run diverge
+		// by method; dispatch below.
+		switch r.Method {
+		case http.MethodGet:
+			s.handleRunAudit(w, r, id)
+		default:
+			w.Header().Set("Allow", "GET")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	case "audit:run":
+		if r.Method == http.MethodPost {
+			s.handleRunAuditRun(w, r, id)
+			return
+		}
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	default:
 		http.NotFound(w, r)
 	}
