@@ -20,8 +20,8 @@ via their `json:` tags — no parallel wire types, by ADR-0010 §4.
 > **Status:**
 >
 >   - **V1 (CLI):** shipped.
->   - **V2 (HTTP transport):** §9 step 1 + 1+ + 2 shipped to main.
->     Step 3 (agent CRUD over HTTP), step 4 (file watcher), and
+>   - **V2 (HTTP transport):** §9 step 1 + 1+ + 2 + 3 shipped to
+>     main. Step 4 (file watcher) and
 >     [followups.md](followups.md) #13 (DAG scheduler) remain.
 >   - **[followups.md](followups.md)** is the single-page index of every
 >     V1.x close-out and V2 deferral, with pointers to the source of

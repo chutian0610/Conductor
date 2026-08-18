@@ -403,6 +403,28 @@ of them depend on each other.
 
 ## Update log
 
+### 2026-08-18 — `POST /v1/agents` body shape shipped in PR #4 differs from §4 (step 3)
+
+The §4 endpoint table lists the body as a single field `config_yaml`
+(parsed + validated). The actual implementation shipped in PR #4
+(adopted as commit 7f898e9 on 2026-08-18) carries a multica-aligned
+**multi-field JSON body** instead:
+
+  - Required: `name`, `backend`
+  - Optional: `description`, `parent` (name or `@id`),
+    `instructions`, `model`, `thinking_level`,
+    `runtime_config` (freeform JSON), `custom_args` (JSON array),
+    `custom_env` (JSON map), `mcp_config` (JSON)
+
+Rationale: multica's CLI/API uses this multi-field shape;
+aligning V2 Conductor's wire shape to multica (and to V2 Conductor's
+storage layer, which now carries the matching columns) made it
+worthwhile to deviate from the literal §4 prose on this one row.
+A follow-up PR may rename the §4 row so this paragraph stays
+internal only.
+
+## Update log
+
 ### 2026-08-18 — Operator decisions: token path + single-owner persistence
 
 Two deviations from the original decision, both owner decisions on
