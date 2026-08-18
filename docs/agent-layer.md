@@ -122,6 +122,35 @@ the HTTP surface: there is no `/v1/runs/{id}/audit:retry` or
 similar endpoint that would let one audit drive the run's
 outcome downstream.
 
+### HTTP
+
+The agent CRUD surface is reachable over the V2 HTTP transport
+(ADR-0010 §4). Bearer-token auth (per `conductor serve --token-out`),
+multica-style multi-field JSON wire body (not a single YAML blob),
+shared `agentregistry.Agent` struct on the wire (snake_case JSON
+tags):
+
+```
+GET    /v1/agents              → 200 + {"agents":[Agent...]} (?backend=, ?model=, ?include_archived=)
+POST   /v1/agents              → 201 + Agent | 400 | 409 (dup name)
+GET    /v1/agents/{id}         → 200 + Agent | 404
+PATCH  /v1/agents/{id}         → 200 + Agent | 400 | 404  (partial body; clear_parent clears parent_id)
+DELETE /v1/agents/{id}         → 204 No Content | 404    (soft archive; row stays, archived_at set)
+GET    /v1/agents/{id}/runs    → 200 + {"runs":[Run...]}  (?status=, ?limit=)
+```
+
+POST / PATCH body fields (all optional except `name` + `backend`):
+`name`, `backend`, `description`, `parent` (name or `@id`), `instructions`,
+`model`, `thinking_level`, `runtime_config` (freeform JSON), `custom_args`
+(JSON array), `custom_env` (JSON map), `mcp_config` (JSON).
+
+This is the **multica-aligned** shape — see `docs/followups.md`
+row #12 + [ADR-0010](adr/0010-v2-http-transport.md) §4 Update log
+for the wire-vs-design-intent note. Storage fields now cover
+`instructions / runtime_config / custom_args / custom_env /
+mcp_config / model / thinking_level`; `archive` is a soft delete
+(the row stays so a future `restore` can unsymlink `archived_at`).
+
 ## Persistence model
 
 The registry is a SQLite database at `<cwd>/.conductor/registry.db`:

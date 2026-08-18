@@ -115,8 +115,13 @@ agent:
   websocket; `exec --json` works with a plain API key and the protocol
   is the same shape as Claude's `stream-json`. See `internal/backend/`
   for the wire details.
-- **V1 is CLI-only.** V2 introduces `conductor serve` —
-  `/v1/healthz`, `/v1/version`, run lifecycle under `/v1/runs/{,/{id},/{id}/events,/{id}/result,/{id}/stream}`, and audit endpoints under `/v1/runs/{id}/audit`, `/v1/runs/{id}/audit:run`, `/v1/audits/pending`. Single bearer token; full endpoint table in [ADR-0010 §4](../docs/adr/0010-v2-http-transport.md).
+- **V1 is CLI-only.** V2 introduces `conductor serve`:
+  `/v1/healthz`, `/v1/version`, run lifecycle under
+  `/v1/runs/{,/{id},/{id}/events,/{id}/result,/{id}/stream}`, audit endpoints
+  under `/v1/runs/{id}/audit`, `/v1/runs/{id}/audit:run`,
+  `/v1/audits/pending`, and agent CRUD under
+  `/v1/agents{,/{id}/{,/runs}}`. Single bearer token; full endpoint
+  table in [ADR-0010 §4](../docs/adr/0010-v2-http-transport.md).
 - **V2 still pending** — DAG scheduler ([followups.md #13](../docs/followups.md)
   per ADR-0010 §9), HTTP-side agent CRUD (ADR-0010 §9 step 3), and the
   daemon file watcher (step 4). The audit surface is already exposed
