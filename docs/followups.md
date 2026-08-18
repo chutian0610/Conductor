@@ -40,7 +40,7 @@ the ADR owns the rationale.
 
 | # | Item | ADR |
 |---|---|---|
-| 12 | V2 HTTP transport (design shipped in ADR-0010; code follows the §9 5-step order — minimum daemon → audit endpoints → agent CRUD via HTTP → file watcher). The endpoint table, SSE streaming format, auth model, and non-goals are pinned. Token lives at `~/.config/conductor/serve.token` (§3) and the registry is single-owner via `flock(2)` on `~/.conductor/conductor.lock` (§6); both are step-1 preconditions. | [ADR-0010](adr/0010-v2-http-transport.md) | in progress |
+| 12 | V2 HTTP transport (PRs #1 + #2 merged). Endpoint table, SSE format, auth model, and non-goals are pinned in [ADR-0010 §4](adr/0010-v2-http-transport.md). Step 1 (minimum daemon: `flock(2)` on `<db-dir>/conductor.lock` → `ErrAlreadyAudited` exit code 2; `CONDUCTOR_TOKEN` env precedence; `/v1/healthz`), step 1+ (run lifecycle endpoints under `/v1/runs/{,/{id},/{id}/events,/{id}/result,/{id}/stream}` plus `/v1/version`), and step 2 (audit endpoints under `/v1/runs/{id}/audit`, `/v1/runs/{id}/audit:run`, plus `/v1/audits/pending`) have shipped to main. Steps 3 (agent CRUD via HTTP) and 4 (daemon file watcher) remain, alongside #13 (DAG scheduler). | [ADR-0010](adr/0010-v2-http-transport.md) | shipped (steps 1/1+/2); step 3 + 4 + DAG pending |
 | 13 | DAG scheduler that triggers runs through the HTTP layer (HTTP design shipped in ADR-0010; DAG itself is the next implementation step) | [ADR-0010](adr/0010-v2-http-transport.md) §9 step 1+ | unblocked |
 | 15 | Re-evaluate `codex app-server` (websocket) if it becomes the only Codex mode | [ADR-0002](adr/0002-codex-exec-json-not-app-server.md) |
 | 16 | Windows process-group / Job Object support | [ADR-0003](adr/0003-refuse-windows-run-time.md) |

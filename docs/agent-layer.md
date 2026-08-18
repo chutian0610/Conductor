@@ -97,6 +97,31 @@ The audit is **judgment, never enforcement**: it never changes the
 run's status, never gates a future `conductor run`, and never drives
 exit code (operators who want CI gating wrap the JSON output in
 their own policy check). Closes followups row #21.
+### HTTP
+
+The same audit surface is reachable over the V2 HTTP transport
+(ADR-0010). All endpoints are bearer-token authenticated
+(`conductor serve --token-out $HOME/.config/conductor/serve.token`
+or the `CONDUCTOR_TOKEN` env var). Wire shapes reuse the registry
+struct so the JSON the HTTP layer returns is byte-identical to
+the `conductor audit --json` output:
+
+```
+GET  /v1/runs/{id}/audit       → 200 + RunAudit row | 404 (no audit yet)
+POST /v1/runs/{id}/audit:run  → 200 + RunAudit | 404 (no such run) | 409 (already audited, force=false)
+GET  /v1/audits/pending       → 200 + {"pending":[run_id...]} (?limit=N, default 50)
+```
+
+`POST /audit:run` is synchronous (ADR-0010 §4 "sync because they
+are cheap-ish"): it spawns the auditor subprocess and the
+response carries the row the auditor wrote once it returns. Wall-
+clock cap is `auditTimeout` (5 min) in `internal/audit`.
+
+The audit-judgment-never-enforcement contract is identical at
+the HTTP surface: there is no `/v1/runs/{id}/audit:retry` or
+similar endpoint that would let one audit drive the run's
+outcome downstream.
+
 ## Persistence model
 
 The registry is a SQLite database at `<cwd>/.conductor/registry.db`:

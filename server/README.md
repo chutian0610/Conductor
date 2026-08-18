@@ -1,14 +1,21 @@
 # Conductor Server
 
-V1 of the **Conductor AI worker** — a Go service that drives an LLM CLI
+The Conductor AI worker — a Go service that drives an LLM CLI
 (Claude Code today; Codex CLI in V1.1) as a subprocess, parses the
-streaming JSON protocol, and exposes a uniform event stream + terminal
-result.
+streaming JSON protocol, and exposes the result through both a CLI
+subcommand tree (`conductor run`, `conductor agent ...`,
+`conductor audit`) and, since V2, a bearer-token HTTP transport
+(`conductor serve`, [ADR-0010](../docs/adr/0010-v2-http-transport.md)).
 
-This repo deliberately contains **no HTTP server and no UI** for V1. The
-only consumer is the `conductor` CLI, which is enough to validate the
-backend+agent abstraction end-to-end. The HTTP layer and DAG scheduler
-land in V2.
+Wire shapes are shared: the same Go structs in
+`internal/agentregistry` and `internal/audit` drive both surfaces,
+so a JSON object emitted by `conductor run --json` is byte-identical
+to one returned by `GET /v1/runs/{id}` (or `GET /v1/runs/{id}/audit`,
+or `/v1/runs/{id}/stream` SSE).
+
+V1's "no HTTP server and no UI" framing still holds for the V1.x
+CLI-only era. The V2 HTTP layer is additive; `conductor` remains a
+single binary (followup #23).
 
 ## Platform support
 
@@ -108,10 +115,12 @@ agent:
   websocket; `exec --json` works with a plain API key and the protocol
   is the same shape as Claude's `stream-json`. See `internal/backend/`
   for the wire details.
-- **No DAG / plan / self-audit / memory** — those are V2. V1 only
-  validates the subprocess boundary + event stream + config schema.
-- **No HTTP server** — `conductor run` is the only entry point. Add one
-  when the V2 DAG scheduler needs an external trigger.
+- **V1 is CLI-only.** V2 introduces `conductor serve` —
+  `/v1/healthz`, `/v1/version`, run lifecycle under `/v1/runs/{,/{id},/{id}/events,/{id}/result,/{id}/stream}`, and audit endpoints under `/v1/runs/{id}/audit`, `/v1/runs/{id}/audit:run`, `/v1/audits/pending`. Single bearer token; full endpoint table in [ADR-0010 §4](../docs/adr/0010-v2-http-transport.md).
+- **V2 still pending** — DAG scheduler ([followups.md #13](../docs/followups.md)
+  per ADR-0010 §9), HTTP-side agent CRUD (ADR-0010 §9 step 3), and the
+  daemon file watcher (step 4). The audit surface is already exposed
+  over HTTP; the Web UI + run-cancel endpoint are out of scope for V2.
 
 ## Verification
 
