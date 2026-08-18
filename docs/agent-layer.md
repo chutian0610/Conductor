@@ -61,6 +61,14 @@ the registry by default. The semantics:
 This mirrors multica's stance: the underlying session result remains
 authoritative, the SQLite store is the audit.
 
+`conductor run` exposes extended thinking through the same events
+pipeline: `MessageThinking` rows land in the `events` table alongside
+text/tool events, so an audit later can recover the model's reasoning
+alongside its outputs. The renderer renders thinking as
+`... <truncated-N-chars>` on stderr (default `thinkingPreviewChars`
+in `cmd/conductor/main.go`). Pass `--quiet` to suppress.
+
+
 ## Persistence model
 
 The registry is a SQLite database at `<cwd>/.conductor/registry.db`:

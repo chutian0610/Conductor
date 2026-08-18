@@ -13,7 +13,7 @@ stream-json --verbose`. Each line on stdout is one of:
 | Event | Type discriminator | Translated to |
 |---|---|---|
 | `{"type":"system",...}`                       | `system` (legacy) / present in stream-json as init | `MessageStatus` ("running") with `SessionID` pinned |
-| `{"type":"assistant","message":{...}}`        | assistant turn | iterate `message.content[]`, mapping each block: `text`→`MessageText`, `thinking`→`MessageThinking`, `tool_use`→`MessageToolUse` (with `Input`) |
+| `{"type":"assistant","message":{...}}`        | assistant turn | iterate `message.content[]`, mapping each block: `text`→`MessageText`, `thinking`→`MessageThinking` (Claude extended-thinking, only present when `agent.thinking:` is set), `tool_use`→`MessageToolUse` (with `Input`) |
 | `{"type":"user","message":{...}}`             | tool result echoed by claude | `MessageToolResult` |
 | `{"type":"result","result":"...","is_error":...,"session_id":"..."}` | terminal | classifies `Result.Status`; populates `Output`, `Error`, `SessionID`, `Usage` |
 | `{"type":"control_request",...}`              | permission prompt | `handleClaudeControlRequest` writes a synthetic deny on stdin (we never accept interactive permissions) |
@@ -34,7 +34,7 @@ Each line on stdout is one of:
 | `{"type":"thread.started","thread_id":"..."}` | session banner  | `MessageStatus` ("running") with `SessionID` (= `thread_id`) |
 | `{"type":"turn.started"}`                     | turn begins     | `MessageStatus` |
 | `{"type":"item.started","item":{...}}`        | item starts     | `MessageToolUse` for `command_execution` (capture command on started; echo is not repeated on completed); `lastAgentText`/`lastReasoning` capture for downstream items |
-| `{"type":"item.completed","item":{...}}`      | item completes  | `MessageToolResult` for command_execution (aggregated_output + exit_code); `MessageText` for `agent_message`; `MessageThinking` for `reasoning` (V1.2) |
+| `{"type":"item.completed","item":{...}}`      | item completes  | `MessageToolResult` for command_execution (aggregated_output + exit_code); `MessageText` for `agent_message`; `MessageThinking` for `reasoning` |
 | `{"type":"turn.completed","usage":{...}}`     | terminal        | closes the turn; usage is folded into `Result.Usage` |
 | `{"type":"error","message":"..."}`            | CLI error       | `MessageError` and an immediate terminal `failed` |
 

@@ -31,7 +31,6 @@ caller yet. Not bugs, just unfilled knobs.
 
 | # | Item | Source |
 |---|---|---|
-| 9 | `MessageThinking` for `reasoning` content (V1.2 candidate) | `docs/protocol.md`, `docs/backends/codex.md:127` |
 | 10 | Codex `--sandbox` / `--profile` / `--oss` are listed in the blocklist as "V1.2 candidates" — the code is wired up, the user-facing config is not | `docs/backends/codex.md:76` |
 
 ## V2 — deferred by ADR
