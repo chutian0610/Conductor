@@ -1,0 +1,52 @@
+# CI for the Conductor server. Runs `make verify` on every push / PR
+# targeting main. Matrix covers macOS + Linux only — Windows refuses-
+# to-run per ADR-0003 (process-group machinery is Unix-only).
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify (Go ${{ matrix.go-version }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        go-version: [1.26.5]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Go ${{ matrix.go-version }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache-dependency-path: server/go.sum
+
+      - name: Run `make verify`
+        working-directory: server
+        run: |
+          make verify
+          # Race detector takes a while; skip in PR runs, run only on main
+          # merges via the workflow_run hook.
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]] && \
+             [[ "${{ github.event_name }}" == "push" ]]; then
+            make test-race
+          fi
+
+      - name: Coverage summary (push to main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        working-directory: server
+        run: |
+          make test-cover
+          # Don't fail the build on coverage regression — coverage delta
+          # is reported via the Go tool summary line, not enforced yet.

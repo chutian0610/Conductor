@@ -47,7 +47,6 @@ the ADR owns the rationale.
 | 15 | Re-evaluate `codex app-server` (websocket) if it becomes the only Codex mode | [ADR-0002](adr/0002-codex-exec-json-not-app-server.md) |
 | 16 | Windows process-group / Job Object support | [ADR-0003](adr/0003-refuse-windows-run-time.md) |
 | 17 | New top-level YAML sections (`plan:`, `dag:`) | [ADR-0004](adr/0004-strict-yaml-schema.md) |
-| 18 | CI workflow file that runs the integration layer (today the `Makefile` covers it; a GitHub Actions / similar config would make the harness explicit) | implicit — no ADR |
 
 | 19 | Agent layer — persistent registry, runs, events, identity env vars (V1.x refresh: defaults + auto-register) | [docs/agent-layer.md](agent-layer.md) + [ADR-0008](adr/0008-agent-registry-persistence-and-identity.md) (superseded by Update log) | shipped |
 | 20 | Rename `internal/agent` → `internal/backend` so package name matches "backend 层 / agent 层" vocabulary (touch: ~1500 LOC, mostly tests) | this row | — |
