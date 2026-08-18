@@ -25,7 +25,7 @@ func listenAndServe(t *testing.T, token string) (addr string, cancel func()) {
 		t.Fatalf("listen: %v", err)
 	}
 	addr = ln.Addr().String()
-	s, err := httpserver.New("placeholder", token, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s, err := httpserver.New("placeholder", token, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 	if err != nil {
 		_ = ln.Close()
 		t.Fatalf("New: %v", err)
@@ -138,7 +138,7 @@ func TestProtectedEndpointWithRightTokenIsPassThrough(t *testing.T) {
 }
 
 func TestNewRejectsEmptyToken(t *testing.T) {
-	if _, err := httpserver.New("127.0.0.1:0", "", nil); err == nil {
+	if _, err := httpserver.New("127.0.0.1:0", "", nil, nil); err == nil {
 		t.Fatal("expected error on empty token")
 	}
 }

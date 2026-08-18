@@ -12,8 +12,10 @@ import (
 	"syscall"
 	"time"
 
+	"conductor/server/internal/agentregistry"
 	"conductor/server/internal/daemonlock"
 	"conductor/server/internal/httpserver"
+	"conductor/server/internal/runmgr"
 	"conductor/server/internal/servertoken"
 
 	"github.com/spf13/cobra"
@@ -134,7 +136,16 @@ func runServe(cmd *cobra.Command, deps runServeDeps) error {
 	logger.Info("conductor: token materialised", "path", tokenPath, "via", tokenSource(tokenPath))
 
 	// Build the HTTP server.
-	srv, err := httpserver.New(deps.bind, tok, logger)
+	// Open the registry in the same dir the lock protects; the
+	// manager and the lock point at the same store.
+	reg, err := agentregistry.Open(registryDir)
+	if err != nil {
+		return fmt.Errorf("conductor serve: open registry: %w", err)
+	}
+	defer reg.Close()
+	mgr := runmgr.New(reg, logger)
+
+	srv, err := httpserver.New(deps.bind, tok, logger, mgr)
 	if err != nil {
 		return err
 	}

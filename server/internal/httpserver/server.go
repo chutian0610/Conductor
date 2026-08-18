@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"conductor/server/internal/runmgr"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -20,6 +21,7 @@ type Server struct {
 	addrResolved string // for Logger; set by ListenAndServe
 	token        string
 	logger       *slog.Logger
+	mgr          *runmgr.Manager // may be nil; run handlers return 503 then
 	http         *http.Server
 }
 
@@ -28,17 +30,25 @@ type Server struct {
 // addr is remembered for [ListenAndServe] but not used by [Serve]
 // (tests supply their own listener).
 //
+// mgr is the run scheduler. A nil mgr is permitted; the run
+// handlers (POST /v1/runs, /v1/runs/{id}, /v1/runs/{id}/events,
+// /v1/runs/{id}/result, /v1/runs/{id}/stream) return 503 in that
+// case. Healthz and version endpoints do not need a manager.
+//
 // A nil logger falls back to [slog.Default].
-func New(addr, token string, logger *slog.Logger) (*Server, error) {
+func New(addr, token string, logger *slog.Logger, mgr *runmgr.Manager) (*Server, error) {
 	if token == "" {
 		return nil, errors.New("httpserver: empty bearer token")
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	s := &Server{addrResolved: addr, token: token, logger: logger}
+	s := &Server{addrResolved: addr, token: token, logger: logger, mgr: mgr}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/healthz", s.handleHealthz)
+	mux.HandleFunc("/v1/version", s.handleVersion)
+	mux.HandleFunc("/v1/runs", s.handleRunsListOrStart) // method-dispatch
+	mux.HandleFunc("/v1/runs/", s.handleRunSubrouter)
 
 	s.http = &http.Server{
 		Handler:      s.authMiddleware(mux),
@@ -147,10 +157,13 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 // defeats trivial timing attacks; V2 has no scope-based auth, so a
 // single shared token is the entire model (see ADR-0010 §3).
 //
-// `GET /v1/healthz` is whitelisted (liveness probe).
+// A small allowlist (`/v1/healthz`, `/v1/version`) bypasses auth so
+// liveness / build-info probes do not have to carry a token. The
+// allowlist is exact-match only — sub-paths stay authenticated.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/healthz" {
+		switch r.URL.Path {
+		case "/v1/healthz", "/v1/version":
 			next.ServeHTTP(w, r)
 			return
 		}
