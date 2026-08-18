@@ -1,7 +1,7 @@
 # 5. System brief is delivered through both per-workdir context file *and* prompt (V1 only)
 
 Date: 2026-08-17
-Status: Accepted (V1), superseded by V2 follow-up
+Status: Accepted (V1); V2 plan implemented (`TaskPrompt` now returns only the per-turn task; brief continues to travel via opts.SystemPrompt + CLAUDE.md / AGENTS.md)
 
 ## Context
 

@@ -204,24 +204,17 @@ func (s *Schema) RuntimeBrief() (string, error) {
 	return b.String(), nil
 }
 
-// TaskPrompt returns the full prompt passed to the spawned CLI: brief +
-// skills + any extra text from --prompt. This is what the LLM sees as
-// its turn input. For providers that read from disk, the brief portion
-// will duplicate content from CLAUDE.md/AGENTS.md — that is intentional
-// for V1 to preserve the existing "everything via stdin" semantics; V2
-// will split cleanly so the prompt parameter carries only the task.
+// TaskPrompt returns the per-turn task that the LLM sees as the
+// first user-message in its stdin stream. It carries ONLY the
+// per-turn content (the operator's --prompt flag, no fallback) —
+// NOT the brief. The brief travels via opts.SystemPrompt →
+// InjectRuntimeConfig → CLAUDE.md (claude) / AGENTS.md (codex) and
+// is automatically loaded by the CLI from the workdir. This is the
+// V2 brief-routing split (ADR-0005) and removes the V1 duplication
+// where the same brief appeared both in the context file and in
+// the user-prompt argument.
 func (s *Schema) TaskPrompt(extraPrompt string) (string, error) {
-	brief, err := s.RuntimeBrief()
-	if err != nil {
-		return "", err
-	}
-	if extraPrompt == "" {
-		return brief, nil
-	}
-	if brief == "" {
-		return extraPrompt, nil
-	}
-	return brief + "\n\n---\n\n" + extraPrompt, nil
+	return extraPrompt, nil
 }
 
 // McpConfigJSON renders the MCP block as the JSON object expected by the
@@ -285,14 +278,15 @@ func (srv MCPServer) toWire() map[string]any {
 	return wire
 }
 
-// ToExecOptions converts the YAML document into an backend.ExecOptions
+// ToExecOptions converts the YAML document into backend.ExecOptions
 // ready for backend.New(backend, cfg).Execute(ctx, prompt, opts).
 //
-// SystemPrompt is set to the runtime brief (agent.prompt + skills). The
-// caller is responsible for passing the full user-visible prompt
-// (brief + extraPrompt) as the `prompt` parameter to Execute, e.g. via
-// Schema.TaskPrompt. See backend.ExecOptions.SystemPrompt for the routing
-// decision.
+// SystemPrompt is set to the runtime brief (agent.prompt + skills).
+// The brief goes ONLY through the per-workdir context file (CLAUDE.md
+// for claude, AGENTS.md for codex); the per-turn user message
+// (`prompt` argument to Execute) carries only the operator's --prompt
+// override via Schema.TaskPrompt. See ADR-0005 for the V1-duplication
+// fix and backend.ExecOptions.SystemPrompt for the routing decision.
 func (s *Schema) ToExecOptions(extraPrompt, resumeID string) (backend.ExecOptions, error) {
 	brief, err := s.RuntimeBrief()
 	if err != nil {

@@ -42,7 +42,6 @@ the ADR owns the rationale.
 |---|---|---|
 | 12 | HTTP transport layer (`internal/http/`, streaming event endpoint, lifecycle hooks) | [ADR-0001](adr/0001-v1-cli-only-no-http.md) |
 | 13 | DAG scheduler that triggers runs through the HTTP layer | [ADR-0001](adr/0001-v1-cli-only-no-http.md) |
-| 14 | `TaskPrompt` → `SystemPrompt` + per-turn task split (today the brief rides both disk and prompt) | [ADR-0005](adr/0005-brief-duplicated-disk-and-prompt-v1.md) "V2 plan" |
 | 15 | Re-evaluate `codex app-server` (websocket) if it becomes the only Codex mode | [ADR-0002](adr/0002-codex-exec-json-not-app-server.md) |
 | 16 | Windows process-group / Job Object support | [ADR-0003](adr/0003-refuse-windows-run-time.md) |
 | 17 | New top-level YAML sections (`plan:`, `dag:`) | [ADR-0004](adr/0004-strict-yaml-schema.md) |

@@ -85,15 +85,17 @@ agent:
 		t.Errorf("expected url on second server")
 	}
 
+	// V2 brief-routing split (ADR-0005): TaskPrompt carries ONLY the
+	// per-turn task. The brief + skills live in CLAUDE.md / AGENTS.md
+	// via opts.SystemPrompt — see split contract pinned by the new
+	// TestTaskPrompt_DoesNotContainBrief below. Here we just verify
+	// the empty-override path.
 	prompt, err := s.TaskPrompt("")
 	if err != nil {
 		t.Fatalf("TaskPrompt: %v", err)
 	}
-	if !strings.Contains(prompt, "Always be terse.") {
-		t.Errorf("prompt = %q, missing skill content", prompt)
-	}
-	if !strings.Contains(prompt, "skill: skill.md") {
-		t.Errorf("prompt = %q, missing skill header", prompt)
+	if prompt != "" {
+		t.Errorf("TaskPrompt with empty override = %q, want empty", prompt)
 	}
 
 	raw, err := s.McpConfigJSON()
@@ -170,16 +172,21 @@ agent:
 	if strings.Contains(opts.SystemPrompt, "cli prompt") {
 		t.Errorf("SystemPrompt = %q, should NOT contain cli prompt (that goes to the prompt parameter)", opts.SystemPrompt)
 	}
-	// TaskPrompt should produce the merged text with cli last.
+	// V2 split: TaskPrompt returns ONLY the cli override (no brief
+	// duplication). The yaml brief lives in opts.SystemPrompt below.
 	full, err := s.TaskPrompt("cli prompt")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(full, "yaml prompt") || !strings.Contains(full, "cli prompt") {
-		t.Errorf("TaskPrompt = %q, want both yaml and cli prompts", full)
+	if full != "cli prompt" {
+		t.Errorf("TaskPrompt with cli override = %q, want %q", full, "cli prompt")
 	}
-	if !strings.HasSuffix(full, "cli prompt") {
-		t.Errorf("TaskPrompt = %q, cli prompt should be appended last", full)
+	// opts.SystemPrompt still carries the yaml brief (unaffected).
+	if !strings.Contains(opts.SystemPrompt, "yaml prompt") {
+		t.Errorf("SystemPrompt = %q, missing yaml prompt", opts.SystemPrompt)
+	}
+	if strings.Contains(opts.SystemPrompt, "cli prompt") {
+		t.Errorf("SystemPrompt = %q, should NOT contain cli prompt (that goes via TaskPrompt)", opts.SystemPrompt)
 	}
 }
 
@@ -195,5 +202,65 @@ agent:
 	}
 	if opts.McpConfig != nil {
 		t.Errorf("McpConfig should be nil when no servers declared")
+	}
+}
+
+// TestTaskPrompt_DoesNotContainBrief pins the V2 brief-routing split
+// (ADR-0005): TaskPrompt returns ONLY the per-turn override. The
+// brief travels through opts.SystemPrompt + InjectRuntimeConfig →
+// CLAUDE.md/AGENTS.md. This split avoids the V1 duplication where the
+// same brief content was delivered both as the context file and as
+// the user-prompt argument to the spawned CLI.
+func TestTaskPrompt_DoesNotContainBrief(t *testing.T) {
+	dir := t.TempDir()
+	skillPath := filepath.Join(dir, "skill.md")
+	if err := os.WriteFile(skillPath, []byte("Always be terse.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	yaml := []byte(`agent:
+  backend: claude
+  prompt: "the yaml brief"
+  skills:
+    - skill.md
+`)
+	s, err := Parse(yaml, dir)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	// 1. TaskPrompt with empty override returns "" (pure per-turn path).
+	got, err := s.TaskPrompt("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Errorf("TaskPrompt with empty override = %q, want empty", got)
+	}
+
+	// 2. TaskPrompt with override returns only the override (no brief).
+	got, err = s.TaskPrompt("per turn question")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "per turn question" {
+		t.Errorf("TaskPrompt with override = %q, want %q", got, "per turn question")
+	}
+	if strings.Contains(got, "yaml brief") {
+		t.Errorf("TaskPrompt leaks the brief into the per-turn prompt: %q", got)
+	}
+	if strings.Contains(got, "skill") {
+		t.Errorf("TaskPrompt leaks skill content into the per-turn prompt: %q", got)
+	}
+
+	// 3. ToExecOptions still routes the brief into opts.SystemPrompt.
+	opts, err := s.ToExecOptions("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(opts.SystemPrompt, "the yaml brief") {
+		t.Errorf("SystemPrompt = %q, missing yaml brief", opts.SystemPrompt)
+	}
+	if !strings.Contains(opts.SystemPrompt, "Always be terse.") {
+		t.Errorf("SystemPrompt = %q, missing skill content", opts.SystemPrompt)
 	}
 }
