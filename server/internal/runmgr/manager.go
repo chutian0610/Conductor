@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"conductor/server/internal/agentregistry"
+	"conductor/server/internal/audit"
 	"conductor/server/internal/backend"
 )
 
@@ -418,6 +419,62 @@ func envSliceToMap(env []string) map[string]string {
 	}
 	return out
 }
+
+// GetLatestAudit returns the latest audit row registered for runID,
+// delegating to the registry store. (runID, found, err) is the
+// (RunAudit, exists?, error) tuple. We do not gate on run existence;
+// callers should resolve Run (via mgr.Run) first if they need to
+// distinguish "no run" from "never audited".
+func (m *Manager) GetLatestAudit(ctx context.Context, runID int64) (agentregistry.RunAudit, bool, error) {
+	return m.store.GetLatestAudit(ctx, runID)
+}
+
+// AuditRun triggers a fresh adversarial audit (ADR-0009) for runID.
+// Force re-audits an already-audited run; Model overrides the auditor
+// backend's default. Returns the RunAudit row that audit.Run wrote,
+// which is what the GET /v1/runs/{id}/audit endpoint serializes —
+// keeping the POST and GET wire shapes in sync via the registry.
+//
+// audit.Run is sync: it blocks until the auditor subprocess finishes,
+// returns ErrAlreadyAudited (without modifying the row) when the run
+// has a non-pending audit and force is false, and writes a fresh row
+// on success. We re-query the registry on success so the response
+// reflects the durable row, including AuditID, InputSHA, PromptSHA
+// (audit.Result itself does not carry the latter two).
+func (m *Manager) AuditRun(ctx context.Context, runID int64, force bool, model string) (agentregistry.RunAudit, error) {
+	if _, err := m.store.GetRun(ctx, runID); err != nil {
+		// Pre-flight to surface ErrNotFound clearly. audit.Run would
+		// emit this too, but the API of this manager prefers to
+		// surface it once instead of through an opaque wrapper err.
+		return agentregistry.RunAudit{}, err
+	}
+	if _, err := audit.Run(ctx, m.store, runID, audit.Options{
+		Force:  force,
+		Model:  model,
+		Logger: m.logger,
+	}); err != nil {
+		return agentregistry.RunAudit{}, err
+	}
+	audited, found, err := m.store.GetLatestAudit(ctx, runID)
+	if err != nil {
+		return agentregistry.RunAudit{}, fmt.Errorf("audit wrote but row unreadable: %w", err)
+	}
+	if !found {
+		return agentregistry.RunAudit{}, errors.New("audit wrote but no row found")
+	}
+	return audited, nil
+}
+
+// ListPendingAudits returns run ids that have never been audited, or
+// whose previous audit is a stale "pending" row left behind by a
+// crashed mid-audit. opts.Limit caps the count (default 50, hard
+// cap 1000).
+func (m *Manager) ListPendingAudits(ctx context.Context, opts agentregistry.ListRunOpts) ([]int64, error) {
+	return m.store.ListPendingAudits(ctx, opts)
+}
+
+// keep strings import alive (used in handleRunAuditRun path above).
+var _ = strings.TrimSpace
 
 // SetBackendFactory overrides how the Manager builds the backend
 // driver for each StartRun. The default (set in [New]) is
