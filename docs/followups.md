@@ -33,7 +33,6 @@ caller yet. Not bugs, just unfilled knobs.
 |---|---|---|
 | 9 | `MessageThinking` for `reasoning` content (V1.2 candidate) | `docs/protocol.md`, `docs/backends/codex.md:127` |
 | 10 | Codex `--sandbox` / `--profile` / `--oss` are listed in the blocklist as "V1.2 candidates" — the code is wired up, the user-facing config is not | `docs/backends/codex.md:76` |
-| 11 | The blocklist silently drops user args that conflict with conductor-owned flags. A future improvement: warn-and-error rather than silently dropping (noted in ADR-0006 consequences) | `docs/adr/0006-per-backend-blocked-args.md` |
 
 ## V2 — deferred by ADR
 

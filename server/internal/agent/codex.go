@@ -160,7 +160,10 @@ func (b *codexBackend) runOneAttempt(
 	runCtx, cancel := runContext(ctx, timeout)
 	defer cancel()
 
-	args := buildCodexArgs(opts)
+	args, dropped := buildCodexArgs(opts)
+	for _, d := range dropped {
+		b.cfg.Logger.Warn("codex: blocked user arg dropped by conductor", "flag", d.Flag, "took_value_with_it", d.TakesValue)
+	}
 	// The prompt is a positional argv entry. We always pass it last; any
 	// user-supplied text that arrived via opts.SystemPrompt was already
 	// persisted to AGENTS.md by InjectRuntimeConfig above.
@@ -327,8 +330,12 @@ func (b *codexBackend) runOneAttempt(
 //	--approve-for-me             : REJECTED — uses original session's approval policy
 //
 // V1.2 candidates (not implemented): sandbox override, --oss, --profile.
-func buildCodexArgs(opts ExecOptions) []string {
-	args := []string{"exec"}
+// buildCodexArgs assembles the argv passed to `codex exec --json`
+// (or `codex exec resume --json` when ResumeSessionID is set). The
+// second return value lists user args the blocklist dropped; the
+// caller logs each entry so silently-ignored config doesn't slip by.
+func buildCodexArgs(opts ExecOptions) (args []string, dropped []BlockedArg) {
+	args = []string{"exec"}
 	if opts.ResumeSessionID != "" {
 		// codex exec resume accepts -m and -c but rejects -C and
 		// --approve-for-me as "unexpected argument" (verified against
@@ -343,7 +350,7 @@ func buildCodexArgs(opts ExecOptions) []string {
 			args = append(args, "-c", "model_reasoning_effort="+opts.ThinkingLevel)
 		}
 		args = append(args, "--json", opts.ResumeSessionID)
-		return args
+		return args, dropped
 	}
 	args = append(args, "--json", "--approve-for-me")
 	if opts.Cwd != "" {
@@ -355,8 +362,10 @@ func buildCodexArgs(opts ExecOptions) []string {
 	if opts.ThinkingLevel != "" {
 		args = append(args, "-c", "model_reasoning_effort="+opts.ThinkingLevel)
 	}
-	args = append(args, codexFilterCustomArgs(opts.CustomArgs)...)
-	return args
+	kept, d := codexFilterCustomArgs(opts.CustomArgs)
+	args = append(args, kept...)
+	dropped = d
+	return args, dropped
 }
 
 var codexBlockedArgs = map[string]struct{}{
@@ -384,7 +393,7 @@ var codexBlockedArgs = map[string]struct{}{
 	"--ignore-rules":                  {},
 }
 
-func codexFilterCustomArgs(userArgs []string) []string {
+func codexFilterCustomArgs(userArgs []string) (kept []string, dropped []BlockedArg) {
 	out := make([]string, 0, len(userArgs))
 	skipNext := false
 	for _, a := range userArgs {
@@ -393,15 +402,16 @@ func codexFilterCustomArgs(userArgs []string) []string {
 			continue
 		}
 		if _, hit := codexBlockedArgs[a]; hit {
-			// -c and --model take a value — drop it too.
-			if a == "-c" || a == "--model" {
+			takesValue := a == "-c" || a == "--model"
+			if takesValue {
 				skipNext = true
 			}
+			dropped = append(dropped, BlockedArg{Flag: a, TakesValue: takesValue})
 			continue
 		}
 		out = append(out, a)
 	}
-	return out
+	return out, dropped
 }
 
 // ── Codex wire types ─────────────────────────────────────────────────────

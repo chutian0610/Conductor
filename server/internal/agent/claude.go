@@ -135,7 +135,10 @@ func (b *claudeBackend) runOneAttempt(
 	runCtx, cancel := runContext(ctx, timeout)
 	defer cancel()
 
-	args := buildClaudeArgs(opts)
+	args, dropped := buildClaudeArgs(opts)
+	for _, d := range dropped {
+		b.cfg.Logger.Warn("claude: blocked user arg dropped by conductor", "flag", d.Flag, "took_value_with_it", d.TakesValue)
+	}
 	if mcpPath != "" {
 		args = append(args, "--mcp-config", mcpPath)
 	}
@@ -319,8 +322,12 @@ func (b *claudeBackend) runOneAttempt(
 // own a small blocklist of flags the user cannot override (--model,
 // --output-format, --mcp-config) so conductor stays in control of the
 // protocol regardless of what the user puts in agent.yaml.
-func buildClaudeArgs(opts ExecOptions) []string {
-	args := []string{
+//
+// The second return value lists user args the blocklist dropped. The
+// caller logs each entry via slog.Warn so operators notice when their
+// `args:` configuration silently had no effect (ADR-0006 consequences).
+func buildClaudeArgs(opts ExecOptions) (args []string, dropped []BlockedArg) {
+	args = []string{
 		"-p",
 		"--output-format", "stream-json",
 		"--input-format", "stream-json",
@@ -348,8 +355,10 @@ func buildClaudeArgs(opts ExecOptions) []string {
 		// shadow it; the blocklist below also covers --resume.
 		args = append(args, "--resume", opts.ResumeSessionID)
 	}
-	args = append(args, filterCustomArgs(opts.CustomArgs)...)
-	return args
+	kept, d := filterCustomArgs(opts.CustomArgs)
+	args = append(args, kept...)
+	dropped = d
+	return args, dropped
 }
 
 var claudeBlockedArgs = map[string]struct{}{
@@ -368,7 +377,15 @@ var claudeBlockedArgs = map[string]struct{}{
 	"-r":                             {},
 }
 
-func filterCustomArgs(userArgs []string) []string {
+// BlockedArg describes one user-supplied CustomArg that the per-backend
+// blocklist silently dropped. Exposed so callers can warn-and-error on
+// user args that didn't take effect (ADR-0006 consequences).
+type BlockedArg struct {
+	Flag       string // the flag the user passed (e.g. "--model")
+	TakesValue bool   // true if we also consumed a following value token
+}
+
+func filterCustomArgs(userArgs []string) (kept []string, dropped []BlockedArg) {
 	out := make([]string, 0, len(userArgs))
 	skipNext := false
 	for _, a := range userArgs {
@@ -377,17 +394,20 @@ func filterCustomArgs(userArgs []string) []string {
 			continue
 		}
 		if _, blocked := claudeBlockedArgs[a]; blocked {
+			takesValue := false
 			switch a {
 			case "--model", "--max-turns", "--mcp-config",
 				"--output-format", "--input-format",
 				"--permission-mode", "--session-name", "-r", "--resume":
 				skipNext = true
+				takesValue = true
 			}
+			dropped = append(dropped, BlockedArg{Flag: a, TakesValue: takesValue})
 			continue
 		}
 		out = append(out, a)
 	}
-	return out
+	return out, dropped
 }
 
 func redactArgs(args []string) []string {

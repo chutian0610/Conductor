@@ -166,7 +166,7 @@ func TestCodexIntegration_Timeout(t *testing.T) {
 // doc/backends/codex.md flags-vs-resume table is the spec; this
 // test pins it so any future codex change gets caught.
 func TestBuildCodexArgs_ResumeAsymmetry(t *testing.T) {
-	freshArgs := buildCodexArgs(ExecOptions{
+	freshArgs, _ := buildCodexArgs(ExecOptions{
 		Cwd:           "/tmp/work",
 		Model:         "gpt-5",
 		ThinkingLevel: "medium",
@@ -178,7 +178,7 @@ func TestBuildCodexArgs_ResumeAsymmetry(t *testing.T) {
 		t.Errorf("fresh exec argv should contain --approve-for-me, got %v", freshArgs)
 	}
 
-	resumeArgs := buildCodexArgs(ExecOptions{
+	resumeArgs, _ := buildCodexArgs(ExecOptions{
 		Cwd:             "/tmp/work",
 		Model:           "gpt-5",
 		ThinkingLevel:   "medium",
@@ -202,7 +202,7 @@ func TestBuildCodexArgs_ResumeAsymmetry(t *testing.T) {
 // construction. Useful as a smoke test alongside the resume
 // asymmetry test — together they pin the protocol-owned flags.
 func TestBuildClaudeArgs_HappyPath(t *testing.T) {
-	args := buildClaudeArgs(ExecOptions{
+	args, _ := buildClaudeArgs(ExecOptions{
 		Model:         "claude-sonnet-4-5",
 		ThinkingLevel: "medium",
 	})
@@ -219,7 +219,7 @@ func TestBuildClaudeArgs_HappyPath(t *testing.T) {
 // TestBuildClaudeArgs_Blocklist is the dedicated check that
 // user CustomArgs cannot override conductor-owned flags.
 func TestBuildClaudeArgs_Blocklist(t *testing.T) {
-	args := buildClaudeArgs(ExecOptions{
+	args, _ := buildClaudeArgs(ExecOptions{
 		Model: "config-model",
 		CustomArgs: []string{
 			"--model", "user-attempt",
