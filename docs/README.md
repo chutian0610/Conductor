@@ -1,19 +1,36 @@
 # Conductor Backend Docs
 
-This directory documents **V1 of the `conductor` backend** — the Go
-service that drives an LLM CLI (Claude Code today, Codex CLI in V1.1)
-as a subprocess and exposes a uniform event stream + terminal result.
+Documents the `conductor` service — a Go worker that drives an LLM CLI
+(Claude Code today, Codex CLI in `exec --json` mode) as a subprocess
+and exposes the resulting event stream + terminal result.
 
-> **Status:** V1 only validates the subprocess boundary + event stream +
-> config schema. No HTTP server, no DAG scheduler, no self-audit, no
-> memory. Those land in V2. See `server/README.md` for the user-facing
-> quick-start (build, run, conductor.yaml shape, verifications).
-> **[followups.md](followups.md)** is the single-page index of every
-> gap and deferred V2 item, with a pointer to the source of truth.
+V1 ships the CLI surface — `conductor run`, `conductor agent ...`,
+`conductor audit`, plus the registry and audit wiring behind them.
+
+V2 adds the daemon mode (`conductor serve`) per [ADR-0010](adr/0010-v2-http-transport.md):
+a single bearer-token HTTP transport rooted at `/v1/`, with the run
+lifecycle endpoints + audit endpoints already shipped and agent CRUD
++ the file watcher + the DAG scheduler still pending.
+
+Wire shapes are shared across both surfaces: the CLI emits and the
+HTTP layer returns the **same Go structs** from
+[`internal/agentregistry` and `internal/audit`](../server/internal/agentregistry/)
+via their `json:` tags — no parallel wire types, by ADR-0010 §4.
+
+> **Status:**
 >
-> **[agent-layer.md](agent-layer.md)** describes the persistent
-> agent registry (`conductor agent ...`) — the V1.x counterpart to
-> multica's `goal_manager.py`.
+>   - **V1 (CLI):** shipped.
+>   - **V2 (HTTP transport):** §9 step 1 + 1+ + 2 shipped to main.
+>     Step 3 (agent CRUD over HTTP), step 4 (file watcher), and
+>     [followups.md](followups.md) #13 (DAG scheduler) remain.
+>   - **[followups.md](followups.md)** is the single-page index of every
+>     V1.x close-out and V2 deferral, with pointers to the source of
+>     truth.
+>
+>   - **[agent-layer.md](agent-layer.md)** describes the persistent
+>     agent registry (`conductor agent ...`), the audit surface
+>     (`conductor audit` and the V2 HTTP counterparts), and the run
+>     / event / identity propagation.
 
 ## Layout
 
