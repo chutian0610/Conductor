@@ -17,8 +17,5 @@ coverage.txt
 # Local agent scratch (created by --cwd / temp MCP configs)
 .conductor/
 
-# Orphaned test fixture (compiled binary, not referenced by source)
-fake-codex
-
 # Coverage artefacts (run `make test-cover` to regenerate)
 coverage.*
