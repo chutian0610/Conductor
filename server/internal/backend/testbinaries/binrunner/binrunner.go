@@ -23,6 +23,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -69,6 +70,16 @@ func Run(cfg Config) {
 	var block bool
 	var exitCode = cfg.DefaultExit
 
+	// drainDone tracks the stdin-drain goroutine. We wait on it
+	// before calling [os.Exit] at the end of [Run] so buffered
+	// writes hit the inode: [os.Exit] skips goroutine defers, so an
+	// unflushed [io.Copy] in drainStdin would lose its tail bytes.
+	// Without this, integration tests that read the captured stdin
+	// (e.g. TestClaudeIntegration_ControlRequest_AllowsAndForcesForeground)
+	// were flaky on Linux: macOS pipe scheduling lets the drain
+	// finish before exit, Linux does not.
+	var drainDone sync.WaitGroup
+
 	flags := map[string]*flagTarget{
 		cfg.ScriptFlag: {value: &scriptPath, takesValue: true},
 		cfg.ArgvFlag:   {value: &argvPath, takesValue: true},
@@ -89,7 +100,9 @@ func Run(cfg Config) {
 	if stdinPath != "" {
 		// Drain stdin in the background so the parent (which writes
 		// the prompt and may close stdin once written) does not block.
+		drainDone.Add(1)
 		go func() {
+			defer drainDone.Done()
 			if err := drainStdin(stdinPath); err != nil && !errors.Is(err, io.EOF) {
 				logf("read stdin: %v", err)
 			}
@@ -108,6 +121,10 @@ func Run(cfg Config) {
 		logf("run script: %v", err)
 		os.Exit(1)
 	}
+	// Ensure drainStdin has finished and its defer [f.Close] has
+	// run before exit. See the drainDone declaration above for
+	// the race that motivated this wait.
+	drainDone.Wait()
 	os.Exit(exitCode)
 }
 
