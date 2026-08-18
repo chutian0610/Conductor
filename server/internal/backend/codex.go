@@ -23,8 +23,7 @@ import (
 //	{"type":"turn.started"}                                — turn begins
 //	{"type":"item.started","item":{...}}                   — item starts
 //	  item.type = "agent_message"      → MessageText
-//	  item.type = "reasoning"          → MessageThinking
-//	  item.type = "command_execution"  → MessageToolUse {Tool: "Bash", CallID}
+////	  item.type = "command_execution"  → MessageToolUse {Tool: "Bash", CallID}
 //	  item.type = "error"              → MessageError
 //	{"type":"item.completed","item":{...}}                 — item finished
 //	  item.type = "command_execution"  → MessageToolResult {CallID, Output}
@@ -39,8 +38,7 @@ import (
 // V1.1 scope: single attempt, no resume, no MCP, no retries.
 // V1.2 added:   resume subcommand + model override (-m) + auto-fallback
 //
-//	on permanent session loss, reasoning items → MessageThinking.
-//
+////
 // The protocol is structurally identical to Claude's stream-json, so
 // codex.go mirrors claude.go's structure almost line-for-line. The big
 // differences are:
@@ -450,8 +448,7 @@ type codexItem struct {
 // not echo it back on item.completed) and emit the matching
 // MessageToolUse / MessageToolResult pair. For agent_message we
 // overwrite lastAgentText so the terminal Result has the right value.
-// For reasoning (V1.2) we emit MessageThinking so the UI can show
-// what the model thought before its final answer.
+// Reasoning (V1.2 — deferred; see followups row 9).
 func handleCodexItem(
 	raw json.RawMessage,
 	ch chan<- Message,
@@ -469,10 +466,6 @@ func handleCodexItem(
 		if completed && item.Text != "" {
 			*lastAgentText = item.Text
 			trySend(ch, Message{Type: MessageText, Content: item.Text})
-		}
-	case "reasoning":
-		if completed && item.Text != "" {
-			trySend(ch, Message{Type: MessageThinking, Content: item.Text})
 		}
 	case "command_execution":
 		if item.ID == "" {

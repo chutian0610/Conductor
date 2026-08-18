@@ -528,10 +528,6 @@ func handleClaudeAssistant(msg claudeSDKMessage, ch chan<- Message, usage map[st
 				assistantText.WriteString(block.Text)
 				trySend(ch, Message{Type: MessageText, Content: block.Text})
 			}
-		case "thinking":
-			if block.Text != "" {
-				trySend(ch, Message{Type: MessageThinking, Content: block.Text})
-			}
 		case "tool_use":
 			toolUseCount++
 			var input map[string]any

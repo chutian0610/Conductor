@@ -116,8 +116,7 @@ type MessageType string
 
 const (
 	MessageText       MessageType = "text"        // assistant text
-	MessageThinking   MessageType = "thinking"    // reasoning block
-	MessageToolUse    MessageType = "tool-use"    // tool invocation start
+MessageToolUse    MessageType = "tool-use"    // tool invocation start
 	MessageToolResult MessageType = "tool-result" // tool invocation result
 	MessageStatus     MessageType = "status"      // lifecycle ("running", ...)
 	MessageError      MessageType = "error"       // error event from the agent

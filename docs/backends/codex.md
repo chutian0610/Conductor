@@ -124,7 +124,6 @@ Dispatch happens in `handleCodexItem`, which fires for both
 `codexItem.Type` values we handle:
 
 - `agent_message` → `MessageText` (the visible assistant turn)
-- `reasoning` → `MessageThinking`
 - `command_execution` → `MessageToolUse` (on started) +
   `MessageToolResult` (on completed, with `aggregated_output` and
   `exit_code`)

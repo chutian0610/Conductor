@@ -36,16 +36,11 @@ import (
 )
 
 
-// Char-budget constants used by renderMessage to clip long LLM
+// Char-budget used by renderMessage to clip long LLM tool
 // outputs before they reach the operator's terminal. Lifted from
-// the inline numeric literals so the values are visible at the
-// call site and assertable in tests without rebuilding golden
-// strings. Adjusting them changes what tests in render_test.go
-// see — bump them only when there's a clear readability win.
-const (
-	thinkingPreviewChars   = 200
-	toolOutputPreviewChars = 400
-)
+// the inline numeric literal so the value is visible at the call
+// site and assertable in tests without rebuilding golden strings.
+const toolOutputPreviewChars = 400
 func main() {
 	if err := root().Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "conductor:", err)
@@ -198,8 +193,6 @@ func renderMessage(w io.Writer, msg backend.Message) {
 	switch msg.Type {
 	case backend.MessageText:
 		fmt.Fprintln(w, "▸", ansiclean.Strip(msg.Content))
-	case backend.MessageThinking:
-		fmt.Fprintln(w, "…", truncate(ansiclean.Strip(msg.Content), thinkingPreviewChars))
 	case backend.MessageToolUse:
 		fmt.Fprintf(w, "🔧 %s %v\n", msg.Tool, compactJSON(sanitizeMap(msg.Input)))
 	case backend.MessageToolResult:

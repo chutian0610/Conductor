@@ -25,24 +25,6 @@ func TestRenderMessage_Text(t *testing.T) {
 	}
 }
 
-func TestRenderMessage_ThinkingTruncates(t *testing.T) {
-	long := strings.Repeat("a", thinkingPreviewChars+50)
-	got := renderOne(t, backend.Message{Type: backend.MessageThinking, Content: long})
-	wantEllipsis := "… " + strings.Repeat("a", thinkingPreviewChars) + "…\n"
-	if got != wantEllipsis {
-		t.Fatalf("got %q want prefix %q", got, wantEllipsis)
-	}
-}
-
-func TestRenderMessage_ThinkingShortNoTruncate(t *testing.T) {
-	short := strings.Repeat("a", 10) // < thinkingPreviewChars
-	got := renderOne(t, backend.Message{Type: backend.MessageThinking, Content: short})
-	want := "… " + short + "\n"
-	if got != want {
-		t.Fatalf("got %q want %q", got, want)
-	}
-}
-
 func TestRenderMessage_ToolUse(t *testing.T) {
 	in := map[string]any{"cmd": "ls", "path": "/tmp"}
 	got := renderOne(t, backend.Message{
