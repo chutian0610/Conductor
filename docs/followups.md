@@ -19,7 +19,6 @@ exercise or ship. Each row points at the source of truth.
 
 | # | Item | Source of truth | Effort |
 |---|---|---|---|
-| 1 | `cmd/conductor` renderer has 0% coverage — `renderMessage` / `renderResult` / `emitUsage` / `emitJSON` / `truncate` are pure stdout formatting | `docs/testing.md` "Known gaps" #4 | ~1.5h (table-driven golden tests) |
 | 2 | Async-launch tool result handling — `claudeToolResultHasAsyncLaunch` + array/map variants all 0% | `docs/testing.md` "Known gaps" #1; `server/internal/agent/claude.go:724-770` | ~1h (one integration scenario + one scenario asserting the runtime branch) |
 | 3 | `handleClaudeControlRequest` JSON-unmarshal-fail branch unreached (73.7% today) | `server/internal/agent/claude.go:561` | ~10m (malformed `request` event in a scenario) |
 | 4 | `writeMcpConfigToTemp` error branches (mkdir / writefile) unreached | `server/internal/agent/claude.go:677` | ~20m (write-protected `TMPDIR` test) |

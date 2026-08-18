@@ -35,6 +35,17 @@ import (
 	"github.com/spf13/cobra"
 )
 
+
+// Char-budget constants used by renderMessage to clip long LLM
+// outputs before they reach the operator's terminal. Lifted from
+// the inline numeric literals so the values are visible at the
+// call site and assertable in tests without rebuilding golden
+// strings. Adjusting them changes what tests in render_test.go
+// see — bump them only when there's a clear readability win.
+const (
+	thinkingPreviewChars   = 200
+	toolOutputPreviewChars = 400
+)
 func main() {
 	if err := root().Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "conductor:", err)
@@ -188,11 +199,11 @@ func renderMessage(w io.Writer, msg agent.Message) {
 	case agent.MessageText:
 		fmt.Fprintln(w, "▸", ansiclean.Strip(msg.Content))
 	case agent.MessageThinking:
-		fmt.Fprintln(w, "…", truncate(ansiclean.Strip(msg.Content), 200))
+		fmt.Fprintln(w, "…", truncate(ansiclean.Strip(msg.Content), thinkingPreviewChars))
 	case agent.MessageToolUse:
 		fmt.Fprintf(w, "🔧 %s %v\n", msg.Tool, compactJSON(sanitizeMap(msg.Input)))
 	case agent.MessageToolResult:
-		fmt.Fprintln(w, "↳", truncate(ansiclean.Strip(msg.Output), 400))
+		fmt.Fprintln(w, "↳", truncate(ansiclean.Strip(msg.Output), toolOutputPreviewChars))
 	case agent.MessageStatus:
 		fmt.Fprintln(w, "·", ansiclean.Strip(msg.Status))
 	case agent.MessageError:
