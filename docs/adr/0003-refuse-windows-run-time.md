@@ -8,7 +8,7 @@ Status: Accepted
 Cancellation correctness in Conductor relies on Unix process groups:
 
 ```go
-// server/internal/agent/proc_other.go
+// server/internal/backend/proc_other.go
 cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 ...
 kill(-pgid, sig)        // SIGTERM to whole tree
@@ -28,7 +28,7 @@ real port is materially different code, not a build-tag flip.
 
 ## Decision
 
-`server/internal/agent/proc_windows.go` exists but only returns an
+`server/internal/backend/proc_windows.go` exists but only returns an
 explicit error at execute time:
 
 > "Windows is not supported by conductor's process-group machinery;

@@ -1,10 +1,10 @@
 # Claude Code backend
 
-> **Source of truth:** `server/internal/agent/claude.go`.
+> **Source of truth:** `server/internal/backend/claude.go`.
 
 ## Summary
 
-`claudeBackend` (`internal/agent/claude.go`) implements `agent.Backend`
+`claudeBackend` (`internal/backend/claude.go`) implements `agent.Backend`
 by spawning the Claude Code CLI in non-interactive mode with streaming
 JSON in/out. Conductor drives everything via stdin / stdout so the
 process is fully headless.
@@ -181,5 +181,5 @@ no fake-binary harness today**; the `testhelpers_test.go` file only
 provides a logger helper and a temp-file helper. Adding a
 `testdata/fake-claude/main.go` + `testdata/fake-codex/main.go` paired
 with a `*_integration_test.go` per backend is the recommended next
-step to lift `internal/agent` coverage and close the gap between the
+step to lift `internal/backend` coverage and close the gap between the
 argv unit tests and the actual `Execute()` lifecycle.

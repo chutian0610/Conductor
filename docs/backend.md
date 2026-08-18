@@ -1,22 +1,22 @@
 # Backend architecture
 
-> **Source of truth:** `server/internal/agent/agent.go`,
-> `server/internal/agent/stream.go`,
-> `server/internal/agent/runtime_config.go`,
-> `server/internal/agent/stderr_tail.go`,
-> `server/internal/agent/resume_fallback.go`,
-> `server/internal/agent/proc_other.go`,
-> `server/internal/agent/proc_windows.go`,
+> **Source of truth:** `server/internal/backend/agent.go`,
+> `server/internal/backend/stream.go`,
+> `server/internal/backend/runtime_config.go`,
+> `server/internal/backend/stderr_tail.go`,
+> `server/internal/backend/resume_fallback.go`,
+> `server/internal/backend/proc_other.go`,
+> `server/internal/backend/proc_windows.go`,
 > `server/cmd/conductor/main.go`.
 
 ## The `Backend` seam
 
-Everything hangs off `agent.Backend` (`internal/agent/agent.go`). The
+Everything hangs off `agent.Backend` (`internal/backend/agent.go`). The
 contract is deliberately small so a third LLM CLI plugs in with one new
 file plus a case in `New()`.
 
 ```go
-// internal/agent/agent.go
+// internal/backend/agent.go
 type Backend interface {
     Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error)
 }
@@ -219,7 +219,7 @@ Both backends follow the same shape; only the preflight target file
 
 ## Termination precedence
 
-`finalizeStreamResult` (`internal/agent/stream.go`) classifies the run in
+`finalizeStreamResult` (`internal/backend/stream.go`) classifies the run in
 this order — earlier checks win:
 
 The earlier check wins. Visualised:

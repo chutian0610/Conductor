@@ -22,7 +22,7 @@ That commonality is what makes Conductor's single uniform
 
 ## Decision
 
-`codexBackend` (in `server/internal/agent/codex.go`) shells out to
+`codexBackend` (in `server/internal/backend/codex.go`) shells out to
 `codex exec --json`. The websocket mode is **not** used and there is
 no abstraction layer that could be repurposed for it later; it would
 require a fundamentally different transport.

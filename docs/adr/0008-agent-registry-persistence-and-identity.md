@@ -13,7 +13,7 @@ in one place.
 ## Context
 
 V1 of Conductor defines a `Backend` seam in
-`server/internal/agent/agent.go` that drives an LLM CLI
+`server/internal/backend/agent.go` that drives an LLM CLI
 (Claude Code / Codex CLI) as a subprocess, parses the streaming JSON
 protocol, and surfaces a uniform event stream + terminal result. That
 package is correctly named *the backend driver* — it answers "how do I
@@ -38,7 +38,7 @@ emission on the streamed `agent.Message` channel.
 ## Decision
 
 Add `server/internal/agentregistry` as the Conductor agent layer. It
-is independent of `internal/agent` (the backend driver) — the two
+is independent of `internal/backend` (the backend driver) — the two
 packages answer different questions and both must stay small. The
 naming explicitly preserves the user's terminology: **backend 层**
 refers to the driver, **agent 层** refers to the registry.
@@ -133,10 +133,10 @@ Positive:
 
 Negative:
 
-- Naming is asymmetric: `internal/agent` (Backend driver) and
-  `internal/agentregistry` (Agent layer). Tracked as followup #19
-  in `docs/followups.md`; the rename would touch ~1500 LOC of tests
-  and so is deferred.
+- Naming was asymmetric (was followup #19 / row #20). The
+  rename to `internal/backend` + `internal/agentregistry` shipped
+  in this release (refactor commit), so the vocabulary matches
+  the user's "backend 层 / agent 层" framing that motivated it.
 - The recorder is best-effort, which means a flaky filesystem will
   silently drop audit rows. We surface this as a stderr log line;
   operators who need stronger guarantees should run `conductor agent

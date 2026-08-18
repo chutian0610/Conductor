@@ -1,8 +1,8 @@
 # Codex CLI backend
 
-> **Source of truth:** `server/internal/agent/codex.go`,
-> `server/internal/agent/codex_mcp.go`,
-> `server/internal/agent/resume_fallback.go`.
+> **Source of truth:** `server/internal/backend/codex.go`,
+> `server/internal/backend/codex_mcp.go`,
+> `server/internal/backend/resume_fallback.go`.
 
 ## Summary
 
@@ -189,5 +189,5 @@ no fake-binary harness today**; the `testhelpers_test.go` file only
 provides a logger helper and a temp-file helper. Adding a
 `testdata/fake-claude/main.go` + `testdata/fake-codex/main.go` paired
 with a `*_integration_test.go` per backend is the recommended next
-step to lift `internal/agent` coverage and close the gap between the
+step to lift `internal/backend` coverage and close the gap between the
 argv unit tests and the actual `Execute()` lifecycle.

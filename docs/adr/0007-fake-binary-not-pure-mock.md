@@ -30,13 +30,13 @@ like more machinery for the same coverage.
 Option 2 — a real fake subprocess — and **no** new abstraction in
 the production path. The harness is:
 
-- `internal/agent/testbinaries/binrunner` — the shared runner. Reads
+- `internal/backend/testbinaries/binrunner` — the shared runner. Reads
   a JSONL script of `{delay_ms, event}` steps, emits each event as
   one JSONL line, records argv, drains stdin to a file, blocks on
   `--block`, exits with `--exit=N`.
-- `internal/agent/testbinaries/fake-claude/main.go` — wraps the
+- `internal/backend/testbinaries/fake-claude/main.go` — wraps the
   runner with the Claude flag names (`--script`, `--argv`, etc.).
-- `internal/agent/testbinaries/fake-codex/main.go` — same, with
+- `internal/backend/testbinaries/fake-codex/main.go` — same, with
   codex flag names.
 - `MustBuildFakeBinary(t, name)` in `testhelpers_test.go` — calls
   `go build -tags testbinaries -o <tmpdir>/<name>` on demand. Build
@@ -119,10 +119,10 @@ Negative:
 
 ## See also
 
-- `server/internal/agent/testbinaries/binrunner/` — the runner.
-- `server/internal/agent/testhelpers_test.go` —
+- `server/internal/backend/testbinaries/binrunner/` — the runner.
+- `server/internal/backend/testhelpers_test.go` —
   `MustBuildFakeBinary`, `WriteScript`, `ReadArgv`.
-- `server/internal/agent/claude_integration_test.go` and
+- `server/internal/backend/claude_integration_test.go` and
   `codex_integration_test.go` — the suites this ADR enabled.
 - `docs/testing.md` — current coverage baseline (post-fake-binary).
 - [ADR-0006](0006-per-backend-blocked-args.md) — the blocklist

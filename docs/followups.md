@@ -19,10 +19,10 @@ exercise or ship. Each row points at the source of truth.
 
 | # | Item | Source of truth | Effort |
 |---|---|---|---|
-| 2 | Async-launch tool result handling — `claudeToolResultHasAsyncLaunch` + array/map variants all 0% | `docs/testing.md` "Known gaps" #1; `server/internal/agent/claude.go:724-770` | ~1h (one integration scenario + one scenario asserting the runtime branch) |
-| 5 | `shouldFallbackToFreshSession` "permanent loss" is now covered end-to-end; the 14.3% gap is the empty-`ResumeContinuityNotice` arm that the integration layer can't drive (it short-circuits the retry before the second attempt). A unit test for it is in `coverage_test.go` already; nothing else to do. | `server/internal/agent/resume_fallback.go:36` | — (closed) |
-| 7 | `releaseProcessGroup` unreachable on macOS without `setpgid`; needs a Linux CI matrix to cover | `server/internal/agent/proc_other.go:35`; `docs/testing.md` "Known gaps" #3 | blocked on CI matrix |
-| 8 | `providerNeedsInlineSystemPrompt` "default false" is asserted in `coverage_test.go`; new providers will need a one-line case + test | `server/internal/agent/runtime_config.go:31` | ~5m per provider |
+| 2 | Async-launch tool result handling — `claudeToolResultHasAsyncLaunch` + array/map variants all 0% | `docs/testing.md` "Known gaps" #1; `server/internal/backend/claude.go:724-770` | ~1h (one integration scenario + one scenario asserting the runtime branch) |
+| 5 | `shouldFallbackToFreshSession` "permanent loss" is now covered end-to-end; the 14.3% gap is the empty-`ResumeContinuityNotice` arm that the integration layer can't drive (it short-circuits the retry before the second attempt). A unit test for it is in `coverage_test.go` already; nothing else to do. | `server/internal/backend/resume_fallback.go:36` | — (closed) |
+| 7 | `releaseProcessGroup` unreachable on macOS without `setpgid`; needs a Linux CI matrix to cover | `server/internal/backend/proc_other.go:35`; `docs/testing.md` "Known gaps" #3 | blocked on CI matrix |
+| 8 | `providerNeedsInlineSystemPrompt` "default false" is asserted in `coverage_test.go`; new providers will need a one-line case + test | `server/internal/backend/runtime_config.go:31` | ~5m per provider |
 
 ## V1.x — feature gaps already in the design
 
@@ -49,7 +49,6 @@ the ADR owns the rationale.
 | 17 | New top-level YAML sections (`plan:`, `dag:`) | [ADR-0004](adr/0004-strict-yaml-schema.md) |
 
 | 19 | Agent layer — persistent registry, runs, events, identity env vars (V1.x refresh: defaults + auto-register) | [docs/agent-layer.md](agent-layer.md) + [ADR-0008](adr/0008-agent-registry-persistence-and-identity.md) (superseded by Update log) | shipped |
-| 20 | Rename `internal/agent` → `internal/backend` so package name matches "backend 层 / agent 层" vocabulary (touch: ~1500 LOC, mostly tests) | this row | — |
 | 21 | Adversarial audit loop: `conductor audit <run-id>` spawns a fresh LLM subprocess to audit a recorded run (multica analogue: `goal_manager.py run_audit`) | [docs/agent-layer.md](agent-layer.md) "Roadmap" | — |
 | 22 | HTTP surface for the registry (V2 transport; ADR-0001 today forbids it) | [ADR-0001](adr/0001-v1-cli-only-no-http.md) | — |
 

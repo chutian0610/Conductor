@@ -17,7 +17,7 @@ mismatched output and the run would emit nonsense.
 Each backend maintains a `*BlockedArgs` map of flags it owns:
 
 ```go
-// internal/agent/claude.go
+// internal/backend/claude.go
 var claudeBlockedArgs = map[string]struct{}{
     "-p": {}, "--output-format": {}, "--input-format": {},
     "--permission-mode": {}, "--strict-mcp-config": {},
@@ -26,7 +26,7 @@ var claudeBlockedArgs = map[string]struct{}{
     "--fork-session": {},
 }
 
-// internal/agent/codex.go
+// internal/backend/codex.go
 var codexBlockedArgs = map[string]struct{}{
     "exec": {}, "resume": {}, "--json": {},
     "--approve-for-me": {}, "-C": {}, "--cwd": {},

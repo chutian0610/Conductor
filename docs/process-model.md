@@ -1,8 +1,8 @@
 # Process model — subprocess, cancellation, Windows refusal
 
-> **Source of truth:** `server/internal/agent/proc_other.go`,
-> `server/internal/agent/proc_windows.go`,
-> `server/internal/agent/stderr_tail.go`,
+> **Source of truth:** `server/internal/backend/proc_other.go`,
+> `server/internal/backend/proc_windows.go`,
+> `server/internal/backend/stderr_tail.go`,
 > `server/cmd/conductor/main.go`.
 
 ## Subprocess lifecycle

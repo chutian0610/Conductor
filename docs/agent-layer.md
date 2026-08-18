@@ -155,8 +155,6 @@ s.FinishRun(ctx, runID, RunFinish{Status: "completed", DurationMs: 100})
 The agent layer enables three planned follow-ups; see
 [`docs/followups.md`](followups.md) items #19, #20, #21:
 
-- **#19** — rename `internal/agent` → `internal/backend` so the
-  package name matches the user's *backend 层 / agent 层* vocabulary.
 - **#20** — adversarial audit loop. Multica spawns a fresh
   `claude -p` subprocess to audit a goal; the equivalent for Conductor
   is a `conductor audit <run-id>` command that runs a separate

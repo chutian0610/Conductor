@@ -49,7 +49,7 @@ end-to-end, without a real Claude/Codex install. See
 [ADR-0007](../adr/0007-fake-binary-not-pure-mock.md) for the
 "why a fake subprocess instead of a Go mock" rationale.
 
-- Harness: `server/internal/agent/testbinaries/`
+- Harness: `server/internal/backend/testbinaries/`
   - `binrunner/` — the shared runner; reads JSONL scenarios, emits
     events, records argv, drains stdin, blocks on `--block`.
   - `fake-claude/main.go` and `fake-codex/main.go` — ~25-line
@@ -106,8 +106,8 @@ Run again after changes to compare.
 | Package | Coverage |
 |---|---|
 | `conductor/server/cmd/conductor`       | 0.0% — no tests (CLI entry only; behaviour is covered indirectly by the agent suites through `Backend.Execute`) |
-| `conductor/server/internal/agent`      | 77.0% |
-| `conductor/server/internal/agent/testbinaries/binrunner` | 46.4% — the harness's blocking-on-signal and stderr paths are not exercised in-process |
+| `conductor/server/internal/backend`      | 77.0% |
+| `conductor/server/internal/backend/testbinaries/binrunner` | 46.4% — the harness's blocking-on-signal and stderr paths are not exercised in-process |
 | `conductor/server/internal/configschema` | 76.9% |
 | **Total statements**                   | **69.1%** |
 

@@ -63,8 +63,8 @@ to see what did not make V1 and why.
 
 To plug in a new LLM CLI (e.g. a hypothetical `grok` or `kimi`):
 
-1. Implement `agent.Backend` (`internal/agent/agent.go`) — one file in
-   `internal/agent/`, exported as a private struct + a `case` in `New()`.
+1. Implement `agent.Backend` (`internal/backend/agent.go`) — one file in
+   `internal/backend/`, exported as a private struct + a `case` in `New()`.
 2. Add the type name to `SupportedTypes`.
 3. If the CLI reads no per-workdir context file, set
    `providerNeedsInlineSystemPrompt("<type>")` to `true` so
@@ -75,7 +75,7 @@ To plug in a new LLM CLI (e.g. a hypothetical `grok` or `kimi`):
 4. Document the wire protocol in `protocol.md`, the argv / blocked-flags
    contract in `backends/<name>.md`.
 5. Tests: build a small Go program that mirrors the wire format
-   (`internal/agent/testbinaries/fake-<name>/`) and point
+   (`internal/backend/testbinaries/fake-<name>/`) and point
    `Config.ExecutablePath` at it. The integration test harness in
    `testhelpers_test.go` is the template — see
    `docs/testing.md` and [ADR-0007](adr/0007-fake-binary-not-pure-mock.md).

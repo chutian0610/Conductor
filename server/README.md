@@ -16,7 +16,7 @@ land in V2.
 |---------|----------|
 | macOS   | Supported (arm64 + amd64) |
 | Linux   | Supported (amd64 + arm64) |
-| Windows | **Not supported.** The binary compiles but refuses to spawn agents at runtime with a clear error. Windows support would require Job Objects and is out of scope — see `internal/agent/proc_windows.go` for the rationale. |
+| Windows | **Not supported.** The binary compiles but refuses to spawn agents at runtime with a clear error. Windows support would require Job Objects and is out of scope — see `internal/backend/proc_windows.go` for the rationale. |
 
 The subprocess machinery relies on Unix process groups (`Setpgid` +
 `kill(-PGID, sig)`) for graceful whole-tree cancellation; that has no
@@ -27,14 +27,14 @@ portable Windows equivalent.
 ```
 server/
 ├── cmd/conductor/        — CLI entry (cobra)
-├── internal/agent/       — Backend interface + claude + codex backends
+├── internal/backend/       — Backend interface + claude + codex backends
 ├── internal/configschema/— conductor.yaml schema + loader
 ├── examples/             — example agent.yaml + skills
 ├── go.mod
 └── README.md
 ```
 
-The Backend interface in `internal/agent/agent.go` is the seam everything
+The Backend interface in `internal/backend/agent.go` is the seam everything
 else hangs off:
 
 ```go
@@ -49,7 +49,7 @@ type Session struct {
 ```
 
 Adopting a new LLM CLI means implementing `Backend` (one file in
-`internal/agent/`) and adding the type name to `SupportedTypes` + the
+`internal/backend/`) and adding the type name to `SupportedTypes` + the
 `switch` in `New()`.
 
 ## Quick start
@@ -106,7 +106,7 @@ agent:
   `codex` (Codex CLI in `exec --json` mode). Codex's app-server mode is
   not used because it requires ChatGPT OAuth for the remote-control
   websocket; `exec --json` works with a plain API key and the protocol
-  is the same shape as Claude's `stream-json`. See `internal/agent/`
+  is the same shape as Claude's `stream-json`. See `internal/backend/`
   for the wire details.
 - **No DAG / plan / self-audit / memory** — those are V2. V1 only
   validates the subprocess boundary + event stream + config schema.
