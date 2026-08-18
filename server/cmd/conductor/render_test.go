@@ -140,7 +140,7 @@ func TestRenderResult_WithSessionUsageError(t *testing.T) {
 		Usage: map[string]backend.TokenUsage{
 			"claude-sonnet-4-5": {InputTokens: 10, OutputTokens: 20, CacheReadTokens: 5},
 		},
-		Error: "boom",
+		Error:  "boom",
 		Output: "final body",
 	})
 	stderrWant := "" +
@@ -295,10 +295,10 @@ func TestTruncate(t *testing.T) {
 
 func TestSanitizeMap_StripsAllStringValues(t *testing.T) {
 	in := map[string]any{
-		"plain":     "hello",
-		"bold":      "\x1b[1mbold\x1b[0m",
-		"nested":    "value \x1b[31mred\x1b[0m end",
-		"keep-key":  "\x1b[1monkey-strips-not-keys\x1b[0m",
+		"plain":    "hello",
+		"bold":     "\x1b[1mbold\x1b[0m",
+		"nested":   "value \x1b[31mred\x1b[0m end",
+		"keep-key": "\x1b[1monkey-strips-not-keys\x1b[0m",
 	}
 	out := sanitizeMap(in)
 	// All four keys must survive; each string value must be ANSI-free.

@@ -18,13 +18,13 @@ import (
 // inside the child process env so the registry can stitch the parent
 // link without the operator touching the YAML.
 const (
-	EnvAgentID        = "CONDUCTOR_AGENT_ID"
-	EnvParentAgentID  = "CONDUCTOR_PARENT_AGENT_ID"
-	EnvParentRunID    = "CONDUCTOR_PARENT_RUN_ID"
-	EnvParentSessID   = "CONDUCTOR_PARENT_SESSION_ID"
-	EnvSessionID      = "CONDUCTOR_SESSION_ID"
-	EnvClaudeSessID   = "CLAUDE_CODE_SESSION_ID" // Claude backend writes this
-	EnvCodexThreadID  = "CODEX_THREAD_ID"       // Codex backend writes this
+	EnvAgentID       = "CONDUCTOR_AGENT_ID"
+	EnvParentAgentID = "CONDUCTOR_PARENT_AGENT_ID"
+	EnvParentRunID   = "CONDUCTOR_PARENT_RUN_ID"
+	EnvParentSessID  = "CONDUCTOR_PARENT_SESSION_ID"
+	EnvSessionID     = "CONDUCTOR_SESSION_ID"
+	EnvClaudeSessID  = "CLAUDE_CODE_SESSION_ID" // Claude backend writes this
+	EnvCodexThreadID = "CODEX_THREAD_ID"        // Codex backend writes this
 )
 
 // CurrentAgentID reads the agent id the calling process is operating

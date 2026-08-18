@@ -35,10 +35,10 @@ import "regexp"
 // ansi matches the escape sequences the LLM wire + shell emit:
 //
 //   - CSI:    ESC '[' params? final-byte  (covers SGR colours, bold,
-//             cursor moves, line clears, etc.)
+//     cursor moves, line clears, etc.)
 //   - OSC:    ESC ']' ... (BEL or ST)     (titles, hyperlink, etc.)
 //   - Misc:   ESC single-byte 0x30-0x7E   (charset/attr, line-text
-//             attributes, RIS, DECPAM, etc.)
+//     attributes, RIS, DECPAM, etc.)
 //
 // The regex favours readability and breadth over blazing performance;
 // it's only ever called once per renderer call on field sizes that

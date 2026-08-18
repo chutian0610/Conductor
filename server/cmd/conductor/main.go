@@ -12,7 +12,7 @@
 //	conductor agent list | show | register | update | archive | runs | events | run
 //	  Manage the persistent agent layer (see package agentregistry).
 //
-// V2 will add: HTTP transport, DAG scheduler.
+// V2 adds: HTTP transport (`serve`), DAG scheduler (`conductor dag` — followup #13).
 package main
 
 import (
@@ -27,23 +27,30 @@ import (
 	"strings"
 	"syscall"
 
-	"conductor/server/internal/backend"
 	"conductor/server/internal/agentregistry"
 	"conductor/server/internal/ansiclean"
+	"conductor/server/internal/backend"
 	"conductor/server/internal/configschema"
+	"conductor/server/internal/daemonlock"
 
 	"github.com/spf13/cobra"
 )
-
 
 // Char-budget used by renderMessage to clip long LLM tool
 // outputs before they reach the operator's terminal. Lifted from
 // the inline numeric literal so the value is visible at the call
 // site and assertable in tests without rebuilding golden strings.
 const toolOutputPreviewChars = 400
+
 func main() {
 	if err := root().Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "conductor:", err)
+		// Map the daemon-lock sentinel onto exit code 2 per
+		// ADR-0010 §6 failure semantics. Other errors keep the
+		// generic code 1.
+		if errors.Is(err, daemonlock.ErrAlreadyHeld) {
+			os.Exit(2)
+		}
 		os.Exit(1)
 	}
 }
@@ -59,6 +66,7 @@ streams a uniform event stream back. V1.x adds the agent layer
 	cmd.AddCommand(runCmd())
 	cmd.AddCommand(agentCmd())
 	cmd.AddCommand(auditCmd())
+	cmd.AddCommand(serveCmd())
 	return cmd
 }
 

@@ -262,4 +262,3 @@ func hasFlag(args []string, want string) bool {
 	}
 	return false
 }
-

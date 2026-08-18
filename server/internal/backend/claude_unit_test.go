@@ -113,7 +113,6 @@ func TestWriteMcpConfigToTemp_MkdirFailure(t *testing.T) {
 	}
 }
 
-
 // TestCleanupMcpConfigTemp_NoOpWhenPathEmpty verifies that a zero
 // path is a no-op — used by the deferred cleanup in run-time paths.
 func TestCleanupMcpConfigTemp_NoOpWhenPathEmpty(t *testing.T) {
@@ -134,7 +133,6 @@ func TestTestLogger_DoesNotPanic(t *testing.T) {
 	var _ io.Writer = os.Stderr
 	_ = io.Discard
 }
-
 
 // TestBuildClaudeArgs_ReportsDropped exercises the new BlockedArg
 // surface. Operators who put `--model my-model` or `--output-format

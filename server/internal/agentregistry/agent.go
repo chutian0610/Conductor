@@ -13,13 +13,13 @@ import (
 // Agent is a registered entity in the registry. It is the
 // operator-facing abstraction; one Agent has many Runs.
 type Agent struct {
-	ID          int64     `json:"id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Backend     string    `json:"backend"`
-	ParentID    int64     `json:"parent_id,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          int64      `json:"id"`
+	Name        string     `json:"name"`
+	Description string     `json:"description"`
+	Backend     string     `json:"backend"`
+	ParentID    int64      `json:"parent_id,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 	ArchivedAt  *time.Time `json:"archived_at,omitempty"`
 }
 
@@ -262,7 +262,6 @@ func parseAgentRef(ref string) (id int64, isID bool, err error) {
 	}
 	return 0, false, nil
 }
-
 
 // lookupArg returns the right scalar to bind to "?" for the chosen
 // lookup column. When looking up by name, the original ref string is

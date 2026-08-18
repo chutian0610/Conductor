@@ -139,7 +139,7 @@ func TestGetAgent_RefForms(t *testing.T) {
 		{"by-name", id, nil},
 		{"@1", id, nil},
 		{"42", 42 /* nonexistent id */, agentregistry.ErrNotFound},
-		{"", 0, nil}, // validation, not ErrNotFound
+		{"", 0, nil},     // validation, not ErrNotFound
 		{"@xyz", 0, nil}, // parse error
 	}
 	for _, tc := range cases {

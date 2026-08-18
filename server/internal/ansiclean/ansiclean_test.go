@@ -7,8 +7,8 @@ func TestStrip_NoEscapes(t *testing.T) {
 		"",
 		"plain",
 		"claude-sonnet-4-5",
-		"MiniMax-M3[1m]",   // legit Claude variant — survives.
-		"MiniMax-M3[1m",    // even without the closing bracket.
+		"MiniMax-M3[1m]", // legit Claude variant — survives.
+		"MiniMax-M3[1m",  // even without the closing bracket.
 		"some \n multi\n line text",
 		"中文 \U0001F600 emoji",
 	}
