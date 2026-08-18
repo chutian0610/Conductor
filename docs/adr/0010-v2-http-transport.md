@@ -73,7 +73,7 @@ When `conductor serve` starts:
     on every request and rejects everything else with 401.
   - If `CONDUCTOR_TOKEN` is unset, the daemon generates a random
     32-byte token, writes it to `--token-out <path>` (default
-    `~/.conductor/token`), and prints it once at startup.
+    `~/.config/conductor/serve.token`), and prints it once at startup.
 
 The CLI subcommands in CLI mode do not need the token (they go
 through the binary directly). The CLI does need the token when
@@ -163,18 +163,68 @@ proxies with read timeouts keep the connection alive.
 Each run's stream is a single SSE connection; the daemon handles
 many concurrent streams (one per active run × active subscriber).
 
-### 6. Persistence — same SQLite, multiple daemons
+### 6. Persistence — single daemon owns the registry
 
-The registry's WAL-mode SQLite is already designed for multiple
-processes (`busy_timeout=10000`, WAL, `foreign_keys=1`). V2 does not
-re-architect the storage layer. Two daemons writing to the same
-registry coordinate via SQLite's normal commit semantics.
+Conductor is local-first: one operator, one machine, one daemon.
+A second `conductor serve` against the same registry is a usage
+bug, not a feature. The product assumption is that multiple
+daemon instances do not arise; we do not paper over them.
 
-The implication: V2 supports running `conductor serve` on multiple
-machines pointing at an NFS-mounted registry file. Whether that's
-a good idea (network filesystem + SQLite = foot-gun) is left as an
-operator concern, not a Conductor feature. The default is one
-daemon, one registry file under `~/.conductor/registry.db` or `<cwd>/.conductor/registry.db` (existing behaviour).
+Concretely:
+
+  - On startup the daemon takes an exclusive, non-blocking
+    `flock(2)` on `conductor.lock` in the registry directory
+    (user-global: `~/.conductor/conductor.lock`; project-local:
+    `<cwd>/.conductor/conductor.lock`). The lock file is created
+    mode 0600 if absent. The parent directory's mode is whatever
+    `mkdir -p` left it (typically 0755), which is fine because
+    `flock(2)` is owner-only and the file itself is 0600.
+  - If the lock is already held, the daemon logs to stderr the
+    existing holder's PID / host / uptime (read from a sidecar
+    `conductor.lock.json` written by the holder), and exits with
+    code 2. There is no `--takeover` flag and there will not be.
+  - `SIGTERM` and `SIGINT` release the lock and remove the sidecar
+    JSON before exiting.
+  - Network filesystems (NFS / SMB / FUSE) are out of scope. The
+    lock is plain POSIX advisory locking; the storage layer makes
+    no claims beyond one host, one daemon.
+
+CLI invocations (`conductor run`, `conductor agent …`,
+`conductor audit …`) do not take the lock. They are short-lived
+and coexist with the daemon through SQLite's normal WAL
+concurrency, identical to V1.x behaviour. The lock is a
+daemon-to-daemon exclusion, not a process-wide one.
+
+WAL-mode SQLite remains in use. Its old job — "coordinate
+multiple writers" — is gone. It is now a single-writer (the
+daemon), multiple-reader contract for the lifetime of one daemon;
+CLI writes piggyback through SQLite's regular commit semantics.
+
+The default registry path remains V1 behaviour: `~/.conductor/registry.db`
+or `<cwd>/.conductor/registry.db`. The token file (§3) lives at
+`~/.config/conductor/serve.token`; the two are intentionally
+separate — the token belongs to a daemon instance, the registry
+belongs to a working directory / operator.
+
+Consequences:
+
+  - A duplicate-daemon startup fails fast with a clear error;
+    silent corruption from "two daemons fighting the same
+    SQLite" is now structurally impossible.
+  - The on-disk surface of the registry directory becomes:
+    `registry.db`, `conductor.lock`, `conductor.lock.json`. A
+    single `rm -rf` on that directory resets both lock state and
+    data.
+  - CLI invocations behave exactly as V1.x. Auto-register on
+    first sight keeps working; the daemon picks up new agents on
+    its next read.
+  - Supervisors (systemd, launchd, runit, tmux) that already do
+    "spawn one, kill on shutdown, retry on exit" work without
+    change; a fast restart before the lock release fails and the
+    supervisor's retry loop should back off.
+  - Operators running `conductor serve` against a network
+    filesystem get an immediate hard error on daemon start
+    instead of mysterious lock-timeout corruption later.
 
 ### 7. Failure semantics — explicit
 
@@ -350,3 +400,37 @@ of them depend on each other.
   - `docs/agent-layer.md` — operator guide for the CLI surface
     that V2's HTTP mirrors.
   - followups row #22 — removed by this ADR.
+
+## Update log
+
+### 2026-08-18 — Operator decisions: token path + single-owner persistence
+
+Two deviations from the original decision, both owner decisions on
+2026-08-18 (chat transcript); rationale recorded for posterity.
+
+#### (a) §3 default token path → `~/.config/conductor/serve.token`
+
+The original default was `~/.conductor/token`. The product wants
+the token file at `~/.config/conductor/serve.token` **literally**
+(not via `os.UserConfigDir()` resolution). Cross-platform behaviour
+is the operator's job; on Linux the default is the bytes above,
+and on macOS / Windows the operator is expected to override
+`--token-out` (Windows is refused outright by ADR-0003 anyway).
+
+#### (b) §6 inverted: single daemon owns the registry
+
+The original §6 said V2 supports multiple daemons against the same
+SQLite, citing WAL coordination and leaving NFS / multi-host as an
+operator concern. That is the wrong default for a local-first
+daemon — the question "why would multiple instances appear?"
+answered itself: they wouldn't, by construction. The new §6
+flips the default to single-owner with `flock(2)` exclusivity,
+no `--takeover` escape hatch, and an explicit out-of-scope note on
+network filesystems. CLI invocations keep V1.x behaviour
+(auto-register on first sight still writes) — the lock is a
+daemon-to-daemon exclusion, not a process-wide one.
+
+The original §6's "V2 supports running `conductor serve` on
+multiple machines pointing at an NFS-mounted registry file"
+sentence is therefore deleted; running two daemons against the
+same registry is no longer a use case this ADR recognises.

@@ -40,14 +40,32 @@ the ADR owns the rationale.
 
 | # | Item | ADR |
 |---|---|---|
-| 12 | V2 HTTP transport (design shipped in ADR-0010; code follows the §9 5-step order — minimum daemon → audit endpoints → agent CRUD via HTTP → file watcher). The endpoint table, SSE streaming format, auth model, and non-goals are pinned. | [ADR-0010](adr/0010-v2-http-transport.md) | in progress |
+| 12 | V2 HTTP transport (design shipped in ADR-0010; code follows the §9 5-step order — minimum daemon → audit endpoints → agent CRUD via HTTP → file watcher). The endpoint table, SSE streaming format, auth model, and non-goals are pinned. Token lives at `~/.config/conductor/serve.token` (§3) and the registry is single-owner via `flock(2)` on `~/.conductor/conductor.lock` (§6); both are step-1 preconditions. | [ADR-0010](adr/0010-v2-http-transport.md) | in progress |
 | 13 | DAG scheduler that triggers runs through the HTTP layer (HTTP design shipped in ADR-0010; DAG itself is the next implementation step) | [ADR-0010](adr/0010-v2-http-transport.md) §9 step 1+ | unblocked |
 | 15 | Re-evaluate `codex app-server` (websocket) if it becomes the only Codex mode | [ADR-0002](adr/0002-codex-exec-json-not-app-server.md) |
 | 16 | Windows process-group / Job Object support | [ADR-0003](adr/0003-refuse-windows-run-time.md) |
 | 17 | New top-level YAML sections (`plan:`, `dag:`) | [ADR-0004](adr/0004-strict-yaml-schema.md) |
+| 23 | `serve` / `client` split: defer; revisit after the V2 HTTP surface stabilises. ADR-0010 §1 ("one binary") stays in force while #12 ships. | [ADR-0010 §1](adr/0010-v2-http-transport.md) | deferred — pending HTTP stability |
 
 | 19 | Agent layer — persistent registry, runs, events, identity env vars (V1.x refresh: defaults + auto-register) | [docs/agent-layer.md](agent-layer.md) + [ADR-0008](adr/0008-agent-registry-persistence-and-identity.md) (superseded by Update log) | shipped |
 | 21 | Adversarial audit loop: `conductor audit <run-id>` spawns a fresh LLM subprocess to audit a recorded run (multica analogue: `goal_manager.py run_audit`) | [ADR-0009](adr/0009-adversarial-audit-loop.md) | shipped |
+
+> **Owner decision (2026-08-18, followup #23):** ADR-0010 §1 ("one
+> binary") holds while #12 ships. The split into separate server /
+> client binaries is **deferred** until the HTTP surface is stable.
+> Stability means **all** of:
+>
+>   - `internal/server` and `internal/cli` are already package-isolated
+>     (prerequisite for splitting without dragging cobra into the
+>     daemon image).
+>   - The `/v1/` endpoint table has been through two daemon minor
+>     versions with no breaking changes.
+>   - At least one real remote client (Web UI / CI hook / IDE plugin)
+>     uses the HTTP surface end-to-end — gives the client binary a
+>     concrete job to do.
+>
+> Until those are in place, "one binary" stands. A future ADR (or
+> row close-out) supersedes this rationale.
 
 ## Closing a row
 
