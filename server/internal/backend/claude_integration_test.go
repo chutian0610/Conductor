@@ -1,4 +1,4 @@
-package agent
+package backend
 
 // Integration tests for claudeBackend, driven by the testbinaries
 // fake (build-tag `testbinaries`). These exercise the full Execute

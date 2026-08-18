@@ -14,7 +14,7 @@
 package main
 
 import (
-	"conductor/server/internal/agent/testbinaries/binrunner"
+	"conductor/server/internal/backend/testbinaries/binrunner"
 )
 
 func main() {

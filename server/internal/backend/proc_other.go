@@ -1,6 +1,6 @@
 //go:build !windows
 
-package agent
+package backend
 
 import (
 	"errors"

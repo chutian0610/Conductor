@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"conductor/server/internal/agent"
+	"conductor/server/internal/backend"
 )
 
 // These tests pin the user-facing CLI output to a deterministic shape.
@@ -18,7 +18,7 @@ import (
 // the CLI contract.
 
 func TestRenderMessage_Text(t *testing.T) {
-	got := renderOne(t, agent.Message{Type: agent.MessageText, Content: "hi"})
+	got := renderOne(t, backend.Message{Type: backend.MessageText, Content: "hi"})
 	want := "▸ hi\n"
 	if got != want {
 		t.Fatalf("got %q want %q", got, want)
@@ -27,7 +27,7 @@ func TestRenderMessage_Text(t *testing.T) {
 
 func TestRenderMessage_ThinkingTruncates(t *testing.T) {
 	long := strings.Repeat("a", thinkingPreviewChars+50)
-	got := renderOne(t, agent.Message{Type: agent.MessageThinking, Content: long})
+	got := renderOne(t, backend.Message{Type: backend.MessageThinking, Content: long})
 	wantEllipsis := "… " + strings.Repeat("a", thinkingPreviewChars) + "…\n"
 	if got != wantEllipsis {
 		t.Fatalf("got %q want prefix %q", got, wantEllipsis)
@@ -36,7 +36,7 @@ func TestRenderMessage_ThinkingTruncates(t *testing.T) {
 
 func TestRenderMessage_ThinkingShortNoTruncate(t *testing.T) {
 	short := strings.Repeat("a", 10) // < thinkingPreviewChars
-	got := renderOne(t, agent.Message{Type: agent.MessageThinking, Content: short})
+	got := renderOne(t, backend.Message{Type: backend.MessageThinking, Content: short})
 	want := "… " + short + "\n"
 	if got != want {
 		t.Fatalf("got %q want %q", got, want)
@@ -45,8 +45,8 @@ func TestRenderMessage_ThinkingShortNoTruncate(t *testing.T) {
 
 func TestRenderMessage_ToolUse(t *testing.T) {
 	in := map[string]any{"cmd": "ls", "path": "/tmp"}
-	got := renderOne(t, agent.Message{
-		Type:  agent.MessageToolUse,
+	got := renderOne(t, backend.Message{
+		Type:  backend.MessageToolUse,
 		Tool:  "Bash",
 		Input: in,
 	})
@@ -62,8 +62,8 @@ func TestRenderMessage_ToolUse_NilInput(t *testing.T) {
 	// sanitizeMap on nil/empty returns the input unchanged, so
 	// compactJSON sees an empty map → empty string → trailing space
 	// before the newline. Pin it so any future reformat is intentional.
-	got := renderOne(t, agent.Message{
-		Type: agent.MessageToolUse,
+	got := renderOne(t, backend.Message{
+		Type: backend.MessageToolUse,
 		Tool: "Bash",
 	})
 	want := "🔧 Bash \n"
@@ -74,8 +74,8 @@ func TestRenderMessage_ToolUse_NilInput(t *testing.T) {
 
 func TestRenderMessage_ToolResultTruncates(t *testing.T) {
 	long := strings.Repeat("z", toolOutputPreviewChars+10)
-	got := renderOne(t, agent.Message{
-		Type:   agent.MessageToolResult,
+	got := renderOne(t, backend.Message{
+		Type:   backend.MessageToolResult,
 		Output: long,
 	})
 	want := "↳ " + strings.Repeat("z", toolOutputPreviewChars) + "…\n"
@@ -85,7 +85,7 @@ func TestRenderMessage_ToolResultTruncates(t *testing.T) {
 }
 
 func TestRenderMessage_Status(t *testing.T) {
-	got := renderOne(t, agent.Message{Type: agent.MessageStatus, Status: "running"})
+	got := renderOne(t, backend.Message{Type: backend.MessageStatus, Status: "running"})
 	want := "· running\n"
 	if got != want {
 		t.Fatalf("got %q want %q", got, want)
@@ -93,7 +93,7 @@ func TestRenderMessage_Status(t *testing.T) {
 }
 
 func TestRenderMessage_Error(t *testing.T) {
-	got := renderOne(t, agent.Message{Type: agent.MessageError, Content: "boom"})
+	got := renderOne(t, backend.Message{Type: backend.MessageError, Content: "boom"})
 	want := "⚠ boom\n"
 	if got != want {
 		t.Fatalf("got %q want %q", got, want)
@@ -101,8 +101,8 @@ func TestRenderMessage_Error(t *testing.T) {
 }
 
 func TestRenderMessage_Log(t *testing.T) {
-	got := renderOne(t, agent.Message{
-		Type:    agent.MessageLog,
+	got := renderOne(t, backend.Message{
+		Type:    backend.MessageLog,
 		Level:   "WARN",
 		Content: "rate limited",
 	})
@@ -116,7 +116,7 @@ func TestRenderMessage_StripsANSI(t *testing.T) {
 	// ESC-prefixed ANSI in any string field is scrubbed by the
 	// renderer — brackets (Claude variant identifiers) survive.
 	in := "\x1b[1mhi\x1b[0m (variant[1m])"
-	got := renderOne(t, agent.Message{Type: agent.MessageText, Content: in})
+	got := renderOne(t, backend.Message{Type: backend.MessageText, Content: in})
 	want := "▸ hi (variant[1m])\n"
 	if got != want {
 		t.Fatalf("got %q want %q", got, want)
@@ -126,7 +126,7 @@ func TestRenderMessage_StripsANSI(t *testing.T) {
 func TestRenderMessage_UnknownTypeProducesNothing(t *testing.T) {
 	// Future MessageType values fall through the switch; the operator
 	// sees nothing rather than a half-rendered line. Pin the contract.
-	got := renderOne(t, agent.Message{Type: "future-thing", Content: "x"})
+	got := renderOne(t, backend.Message{Type: "future-thing", Content: "x"})
 	if got != "" {
 		t.Fatalf("got %q want empty", got)
 	}
@@ -136,7 +136,7 @@ func TestRenderMessage_UnknownTypeProducesNothing(t *testing.T) {
 
 func TestRenderResult_BasicCompleted(t *testing.T) {
 	var stderr, stdout bytes.Buffer
-	renderResult(&stderr, &stdout, agent.Result{
+	renderResult(&stderr, &stdout, backend.Result{
 		Status:     "completed",
 		DurationMs: 1234,
 	})
@@ -151,11 +151,11 @@ func TestRenderResult_BasicCompleted(t *testing.T) {
 
 func TestRenderResult_WithSessionUsageError(t *testing.T) {
 	var stderr, stdout bytes.Buffer
-	renderResult(&stderr, &stdout, agent.Result{
+	renderResult(&stderr, &stdout, backend.Result{
 		Status:     "failed",
 		DurationMs: 17,
 		SessionID:  "sess-X",
-		Usage: map[string]agent.TokenUsage{
+		Usage: map[string]backend.TokenUsage{
 			"claude-sonnet-4-5": {InputTokens: 10, OutputTokens: 20, CacheReadTokens: 5},
 		},
 		Error: "boom",
@@ -178,7 +178,7 @@ func TestRenderResult_WithSessionUsageError(t *testing.T) {
 
 func TestEmitUsage_Empty(t *testing.T) {
 	var buf bytes.Buffer
-	emitUsage(&buf, map[string]agent.TokenUsage{})
+	emitUsage(&buf, map[string]backend.TokenUsage{})
 	if buf.Len() != 0 {
 		t.Fatalf("expected no output, got %q", buf.String())
 	}
@@ -186,7 +186,7 @@ func TestEmitUsage_Empty(t *testing.T) {
 
 func TestEmitUsage_FullLineShape(t *testing.T) {
 	var buf bytes.Buffer
-	emitUsage(&buf, map[string]agent.TokenUsage{
+	emitUsage(&buf, map[string]backend.TokenUsage{
 		"claude-sonnet-4-5": {InputTokens: 100, OutputTokens: 50, CacheReadTokens: 128, CacheWriteTokens: 0},
 	})
 	want := "tokens[claude-sonnet-4-5]: in=100 out=50 cache_r=128 cache_w=0\n"
@@ -198,7 +198,7 @@ func TestEmitUsage_FullLineShape(t *testing.T) {
 func TestEmitUsage_PreservesClaudeVariant(t *testing.T) {
 	// ansiclean.Strip keeps bracket content like MiniMax-M3[1m] intact.
 	var buf bytes.Buffer
-	emitUsage(&buf, map[string]agent.TokenUsage{
+	emitUsage(&buf, map[string]backend.TokenUsage{
 		"MiniMax-M3[1m]": {InputTokens: 1, OutputTokens: 2},
 	})
 	want := "tokens[MiniMax-M3[1m]]: in=1 out=2 cache_r=0 cache_w=0\n"
@@ -211,7 +211,7 @@ func TestEmitUsage_MultipleModels(t *testing.T) {
 	// Iteration order is map-iteration dependent; assert both lines
 	// are present rather than a specific order.
 	var buf bytes.Buffer
-	emitUsage(&buf, map[string]agent.TokenUsage{
+	emitUsage(&buf, map[string]backend.TokenUsage{
 		"a": {InputTokens: 1, OutputTokens: 1},
 		"b": {InputTokens: 2, OutputTokens: 2},
 	})
@@ -228,7 +228,7 @@ func TestEmitUsage_MultipleModels(t *testing.T) {
 
 func TestEmitJSON_Shape(t *testing.T) {
 	var buf bytes.Buffer
-	emitJSON(&buf, "event", agent.Message{Type: agent.MessageText, Content: "hi"})
+	emitJSON(&buf, "event", backend.Message{Type: backend.MessageText, Content: "hi"})
 	got := strings.TrimSpace(buf.String())
 	var decoded map[string]any
 	if err := json.Unmarshal([]byte(got), &decoded); err != nil {
@@ -356,7 +356,7 @@ func TestSanitizeMap_PreservesNonStringValues(t *testing.T) {
 
 // --- helpers ------------------------------------------------------------
 
-func renderOne(t *testing.T, msg agent.Message) string {
+func renderOne(t *testing.T, msg backend.Message) string {
 	t.Helper()
 	var buf bytes.Buffer
 	renderMessage(&buf, msg)

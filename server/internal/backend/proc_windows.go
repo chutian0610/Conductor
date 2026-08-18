@@ -11,7 +11,7 @@
 // portable Windows equivalent; supporting Windows would require Job
 // Objects (see multica's server/pkg/agent/proc_windows.go for a
 // reference implementation), which is out of scope for this project.
-package agent
+package backend
 
 import (
 	"fmt"
@@ -38,7 +38,7 @@ func hideAgentWindow(_ *exec.Cmd) {}
 func configureProcessGroup(_ *exec.Cmd) {}
 
 // startOwnedProcessTree refuses to launch anything. Returning an error
-// here means agent.Backend.Execute fails fast before spawning a process
+// here means backend.Backend.Execute fails fast before spawning a process
 // the project cannot manage.
 func startOwnedProcessTree(_ *exec.Cmd, _ *slog.Logger) error {
 	return errWindowsUnsupported

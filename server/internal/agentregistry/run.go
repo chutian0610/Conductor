@@ -16,7 +16,7 @@ import (
 // Run captures a single execution of an Agent. One Agent has many
 // Runs; a Run owns its Events.
 //
-// Status values mirror agent.Result.Status: "running", "completed",
+// Status values mirror backend.Result.Status: "running", "completed",
 // "failed", "timeout", "cancelled". "running" is the only non-terminal
 // status and is set by StartRun.
 type Run struct {

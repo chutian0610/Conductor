@@ -26,7 +26,7 @@
 // log" item (e)).
 //
 // Stripping intentionally happens only at the renderer boundary —
-// never inside `agent.Result` or the events table. Operators who want
+// never inside `backend.Result` or the events table. Operators who want
 // the raw bytes can read the DB directly.
 package ansiclean
 

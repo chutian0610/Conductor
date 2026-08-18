@@ -1,4 +1,4 @@
-package agent
+package backend
 
 // Unit tests for the small Claude-side helpers that the integration
 // scenarios don't directly exercise. They live in package agent (not

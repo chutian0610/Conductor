@@ -11,8 +11,8 @@ import (
 	"runtime"
 	"testing"
 
-	"conductor/server/internal/agent"
-	"conductor/server/internal/agent/testbinaries/binrunner"
+	"conductor/server/internal/backend"
+	"conductor/server/internal/backend/testbinaries/binrunner"
 	"conductor/server/internal/agentregistry"
 	"conductor/server/internal/configschema"
 )
@@ -21,7 +21,7 @@ import (
 // runRecorder using the existing fake-claude fixture. It exercises:
 //
 //   - the agentregistry SQLite store (on-disk at t.TempDir())
-//   - agent.New with a custom ExecutablePath pointing at fake-claude
+//   - backend.New with a custom ExecutablePath pointing at fake-claude
 //   - the runRecorder (start / event / finish) wired through the
 //     same exec→drain→finish sequence `conductor agent run` uses
 //
@@ -63,14 +63,14 @@ func TestRecorder_EndToEnd(t *testing.T) {
 		t.Fatalf("recorder start: %v", err)
 	}
 
-	backend, err := agent.New("claude", agent.Config{
+	b, err := backend.New("claude", backend.Config{
 		ExecutablePath: bin,
 		Logger:         slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelWarn})),
 	})
 	if err != nil {
-		t.Fatalf("agent.New: %v", err)
+		t.Fatalf("backend.New: %v", err)
 	}
-	session, err := backend.Execute(ctx, "hi", agent.ExecOptions{
+	session, err := b.Execute(ctx, "hi", backend.ExecOptions{
 		CustomArgs: []string{"--script", script, "--argv", argv},
 	})
 	if err != nil {
@@ -178,7 +178,7 @@ func buildFakeClaude(t *testing.T) string {
 		t.Fatalf("look up `go`: %v", err)
 	}
 	cmd := exec.Command(goBin, "build", "-tags", "testbinaries",
-		"-o", out, "./internal/agent/testbinaries/fake-claude")
+		"-o", out, "./internal/backend/testbinaries/fake-claude")
 	cmd.Dir = serverRoot
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -205,7 +205,7 @@ func contains(haystack, needle string) bool {
 // `doRun` calls).
 func TestRun_DefaultRecords_AndAutoRegisters(t *testing.T) {
 	dir := t.TempDir()
-	// Build a fake binary so we can invoke agent.New without PATH.
+	// Build a fake binary so we can invoke backend.New without PATH.
 	bin := buildFakeClaude(t)
 
 	// Synthesize a minimal *configschema.Schema (the production
@@ -339,7 +339,7 @@ func runExecuteBackendAgainstFake(t *testing.T, schema *configschema.Schema, rec
 	})
 
 	ctx := context.Background()
-	backend, err := agent.New(schema.Agent.Backend, agent.Config{
+	b, err := backend.New(schema.Agent.Backend, backend.Config{
 		ExecutablePath: bin,
 		Logger:         slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelWarn})),
 	})
@@ -347,7 +347,7 @@ func runExecuteBackendAgainstFake(t *testing.T, schema *configschema.Schema, rec
 		return err
 	}
 	return executeBackend(ctx, io.Discard, io.Discard, schema.Agent.Backend,
-		backend, "hi", agent.ExecOptions{
+		b, "hi", backend.ExecOptions{
 			CustomArgs: []string{"--script", script, "--argv", filepath.Join(dir, "argv.jsonl")},
 		}, rec, true /* asJSON */, true /* quiet */)
 }

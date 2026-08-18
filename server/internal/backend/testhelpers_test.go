@@ -1,4 +1,4 @@
-package agent
+package backend
 
 import (
 	"encoding/json"
@@ -10,7 +10,7 @@ import (
 	"runtime"
 	"testing"
 
-	"conductor/server/internal/agent/testbinaries/binrunner"
+	"conductor/server/internal/backend/testbinaries/binrunner"
 )
 
 // testLogger returns a slog logger that emits at Warn level to the test's
@@ -112,7 +112,7 @@ func MustBuildFakeBinary(t *testing.T, name string) string {
 		t.Fatalf("look up `go`: %v", err)
 	}
 	cmd := exec.Command(goBin, "build", "-tags", "testbinaries",
-		"-o", out, "./internal/agent/testbinaries/"+name)
+		"-o", out, "./internal/backend/testbinaries/"+name)
 	cmd.Dir = serverRoot(t)
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -132,7 +132,7 @@ func serverRoot(t *testing.T) string {
 	}
 	// this file lives at <server>/internal/agent/testhelpers_test.go,
 	// so the server root is three parents up.
-	d := filepath.Dir(file) // .../internal/agent
+	d := filepath.Dir(file) // .../internal/backend
 	d = filepath.Dir(d)     // .../internal
 	return filepath.Dir(d)  // .../server
 }

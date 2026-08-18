@@ -1,4 +1,4 @@
-package agent
+package backend
 
 // Integration tests for codexBackend, driven by fake-codex
 // (testbinaries build tag). Same shape as the claude suite: cover

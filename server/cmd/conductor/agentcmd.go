@@ -12,7 +12,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"conductor/server/internal/agent"
+	"conductor/server/internal/backend"
 	"conductor/server/internal/agentregistry"
 	"conductor/server/internal/configschema"
 
@@ -506,7 +506,7 @@ func (r *runRecorder) recordEvent(ctx context.Context, kind string, payload []by
 
 // finish writes the terminal outcome; same best-effort stance as
 // recordEvent. Errors never escape.
-func (r *runRecorder) finish(ctx context.Context, res agent.Result) {
+func (r *runRecorder) finish(ctx context.Context, res backend.Result) {
 	if r.runID == 0 {
 		return
 	}
@@ -560,12 +560,12 @@ func runWithRecorder(
 	ctx context.Context,
 	stdout, stderr io.Writer,
 	backendType, prompt string,
-	opts agent.ExecOptions,
+	opts backend.ExecOptions,
 	rec *runRecorder,
 	asJSON, quiet bool,
 ) error {
 	logger := slog.New(slog.NewJSONHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	backend, err := agent.New(backendType, agent.Config{Logger: logger})
+	backend, err := backend.New(backendType, backend.Config{Logger: logger})
 	if err != nil {
 		return err
 	}

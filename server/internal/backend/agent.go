@@ -8,7 +8,7 @@
 // timeout). Provider-specific knobs (resume session ids, service tiers,
 // plugin settings, etc.) belong in ExecOptions fields the relevant backend
 // reads; absent fields stay absent rather than being pre-declared.
-package agent
+package backend
 
 import (
 	"context"

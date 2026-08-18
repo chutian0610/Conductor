@@ -1,5 +1,5 @@
 // Package configschema defines the conductor.yaml document and produces an
-// agent.ExecOptions from it.
+// backend.ExecOptions from it.
 //
 // The schema is deliberately YAML-shaped (not Go struct tags) so future
 // versions can validate documents with a JSON Schema validator if that
@@ -10,7 +10,7 @@
 //	version    MUST be 1.
 //	agent      The single agent definition this conductor run will use.
 //	           Multi-agent dispatch is a V2 concern (DAG / plan layer).
-//	agent.backend   One of agent.IsSupportedType()'s list. Drives which
+//	agent.backend   One of backend.IsSupportedType()'s list. Drives which
 //	                Backend implementation handles Execute().
 //	agent.model     Model identifier (passed verbatim to the CLI's
 //	                --model flag). Empty means "let the CLI choose".
@@ -47,7 +47,7 @@ import (
 	"strings"
 	"time"
 
-	"conductor/server/internal/agent"
+	"conductor/server/internal/backend"
 
 	"gopkg.in/yaml.v3"
 )
@@ -95,7 +95,7 @@ type MCPServer struct {
 }
 
 // Load reads, parses, and validates a conductor.yaml at path. The returned
-// Schema is ready to convert to agent.ExecOptions via ToExecOptions().
+// Schema is ready to convert to backend.ExecOptions via ToExecOptions().
 func Load(path string) (*Schema, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -134,9 +134,9 @@ func (s *Schema) Validate() error {
 	if s.Agent.Backend == "" {
 		return errors.New("schema: agent.backend is required")
 	}
-	if !agent.IsSupportedType(s.Agent.Backend) {
+	if !backend.IsSupportedType(s.Agent.Backend) {
 		return fmt.Errorf("schema: agent.backend %q is not supported (try: %v)",
-			s.Agent.Backend, agent.SupportedTypes)
+			s.Agent.Backend, backend.SupportedTypes)
 	}
 	if s.Agent.MaxTurns < 0 {
 		return errors.New("schema: agent.max_turns must be >= 0")
@@ -184,7 +184,7 @@ func (s *Schema) resolvePaths(baseDir string) {
 // the backend before spawning the CLI, so the LLM reads it natively
 // instead of receiving it twice (once on disk, once via stdin).
 //
-// Routing decision lives in conductor/server/internal/agent/runtime_config.go.
+// Routing decision lives in conductor/server/internal/backend/runtime_config.go.
 func (s *Schema) RuntimeBrief() (string, error) {
 	var b strings.Builder
 	if s.Agent.Prompt != "" {
@@ -285,35 +285,35 @@ func (srv MCPServer) toWire() map[string]any {
 	return wire
 }
 
-// ToExecOptions converts the YAML document into an agent.ExecOptions
-// ready for agent.New(backend, cfg).Execute(ctx, prompt, opts).
+// ToExecOptions converts the YAML document into an backend.ExecOptions
+// ready for backend.New(backend, cfg).Execute(ctx, prompt, opts).
 //
 // SystemPrompt is set to the runtime brief (agent.prompt + skills). The
 // caller is responsible for passing the full user-visible prompt
 // (brief + extraPrompt) as the `prompt` parameter to Execute, e.g. via
-// Schema.TaskPrompt. See agent.ExecOptions.SystemPrompt for the routing
+// Schema.TaskPrompt. See backend.ExecOptions.SystemPrompt for the routing
 // decision.
-func (s *Schema) ToExecOptions(extraPrompt, resumeID string) (agent.ExecOptions, error) {
+func (s *Schema) ToExecOptions(extraPrompt, resumeID string) (backend.ExecOptions, error) {
 	brief, err := s.RuntimeBrief()
 	if err != nil {
-		return agent.ExecOptions{}, err
+		return backend.ExecOptions{}, err
 	}
 
 	mcpRaw, err := s.McpConfigJSON()
 	if err != nil {
-		return agent.ExecOptions{}, err
+		return backend.ExecOptions{}, err
 	}
 
 	var timeout time.Duration
 	if s.Agent.Timeout != "" {
 		t, err := time.ParseDuration(s.Agent.Timeout)
 		if err != nil {
-			return agent.ExecOptions{}, fmt.Errorf("schema: agent.timeout %q: %w", s.Agent.Timeout, err)
+			return backend.ExecOptions{}, fmt.Errorf("schema: agent.timeout %q: %w", s.Agent.Timeout, err)
 		}
 		timeout = t
 	}
 
-	return agent.ExecOptions{
+	return backend.ExecOptions{
 		Cwd:             s.Agent.Cwd,
 		Model:           s.Agent.Model,
 		SystemPrompt:    brief,

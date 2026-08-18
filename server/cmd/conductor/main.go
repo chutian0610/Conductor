@@ -1,6 +1,6 @@
 // Command conductor is the CLI for the Conductor AI worker. It loads a
 // conductor.yaml agent definition, instantiates the matching LLM backend
-// from conductor/server/internal/agent, and runs the configured prompt.
+// from conductor/server/internal/backend, and runs the configured prompt.
 //
 // V1.x subcommands:
 //
@@ -27,7 +27,7 @@ import (
 	"strings"
 	"syscall"
 
-	"conductor/server/internal/agent"
+	"conductor/server/internal/backend"
 	"conductor/server/internal/agentregistry"
 	"conductor/server/internal/ansiclean"
 	"conductor/server/internal/configschema"
@@ -145,7 +145,7 @@ func doRun(stdout, stderr io.Writer, configPath, extraPrompt, resumeID string, a
 	defer stop()
 
 	logger := slog.New(slog.NewJSONHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	backend, err := agent.New(schema.Agent.Backend, agent.Config{Logger: logger})
+	backend, err := backend.New(schema.Agent.Backend, backend.Config{Logger: logger})
 	if err != nil {
 		return err
 	}
@@ -194,21 +194,21 @@ func openRecorderForRun(enabled bool, schema *configschema.Schema, prompt string
 // the LLM emitted (or upstream parsers mangled) don't surface as
 // literal `[1m`-style artifacts in the operator's terminal. The raw
 // payload still lives in the registry's events table for replay.
-func renderMessage(w io.Writer, msg agent.Message) {
+func renderMessage(w io.Writer, msg backend.Message) {
 	switch msg.Type {
-	case agent.MessageText:
+	case backend.MessageText:
 		fmt.Fprintln(w, "▸", ansiclean.Strip(msg.Content))
-	case agent.MessageThinking:
+	case backend.MessageThinking:
 		fmt.Fprintln(w, "…", truncate(ansiclean.Strip(msg.Content), thinkingPreviewChars))
-	case agent.MessageToolUse:
+	case backend.MessageToolUse:
 		fmt.Fprintf(w, "🔧 %s %v\n", msg.Tool, compactJSON(sanitizeMap(msg.Input)))
-	case agent.MessageToolResult:
+	case backend.MessageToolResult:
 		fmt.Fprintln(w, "↳", truncate(ansiclean.Strip(msg.Output), toolOutputPreviewChars))
-	case agent.MessageStatus:
+	case backend.MessageStatus:
 		fmt.Fprintln(w, "·", ansiclean.Strip(msg.Status))
-	case agent.MessageError:
+	case backend.MessageError:
 		fmt.Fprintln(w, "⚠", ansiclean.Strip(msg.Content))
-	case agent.MessageLog:
+	case backend.MessageLog:
 		fmt.Fprintf(w, "[%s] %s\n", ansiclean.Strip(msg.Level), ansiclean.Strip(msg.Content))
 	}
 }
@@ -234,7 +234,7 @@ func sanitizeMap(m map[string]any) map[string]any {
 // renderResult writes the terminal outcome to stderr (status / error) and
 // the final user-facing output to stdout. This split is the convention
 // `conductor run` follows so users can `conductor run ... > out.md`.
-func renderResult(stderr, stdout io.Writer, res agent.Result) {
+func renderResult(stderr, stdout io.Writer, res backend.Result) {
 	fmt.Fprintf(stderr, "\n— %s (%d ms) —\n", strings.ToUpper(res.Status), res.DurationMs)
 	if res.SessionID != "" {
 		fmt.Fprintf(stderr, "session: %s\n", res.SessionID)
@@ -250,7 +250,7 @@ func renderResult(stderr, stdout io.Writer, res agent.Result) {
 	}
 }
 
-func emitUsage(w io.Writer, usage map[string]agent.TokenUsage) {
+func emitUsage(w io.Writer, usage map[string]backend.TokenUsage) {
 	for model, u := range usage {
 		// Strip removes ESC-prefixed ANSI from the model name.
 		// It does NOT touch bracket-y content: Claude's variant
@@ -300,9 +300,9 @@ func executeBackend(
 	ctx context.Context,
 	stdout, stderr io.Writer,
 	backendType string,
-	backend agent.Backend,
+	backend backend.Backend,
 	prompt string,
-	opts agent.ExecOptions,
+	opts backend.ExecOptions,
 	rec *runRecorder,
 	asJSON, quiet bool,
 ) error {

@@ -274,7 +274,7 @@ func lookupArg(ref string, id int64, isID bool) any {
 	return ref
 }
 
-// isKnownBackend mirrors agent.IsSupportedType without importing the
+// isKnownBackend mirrors backend.IsSupportedType without importing the
 // backend package (the registry must compile even if a new backend is
 // added later and we want one source of truth).
 func isKnownBackend(b string) bool {
