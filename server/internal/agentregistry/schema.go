@@ -12,11 +12,22 @@ package agentregistry
 // We add `parent_id` / `parent_run_id` to express sub-agent spawn
 // structure that multica captures only via env vars.
 const (
-	schemaVersion = 1
+	// schemaVersion 2: agent rows carry the runtime-config columns
+	// (instructions / runtime_config / custom_args / custom_env /
+	// mcp_config / model / thinking_level) so the V2 HTTP surface
+	// (POST /v1/agents etc.) can store a full multica-aligned agent
+	// definition. v1 databases are ALTER TABLE'd up on first open
+	// after this commit; see initSchema in store.go.
+	schemaVersion = 2
 
-	schemaVersionPragma = `PRAGMA user_version = 1;`
+	schemaVersionPragma = `PRAGMA user_version = 2;`
 )
 
+// agentsSchema describes the V1 baseline. The new runtime-config
+// columns live in agentsColumnsV2Up below and are added by the
+// gated migration in initSchema (store.go). Keeping the CREATE
+// shape at V1 means fresh DBs and existing V1 DBs follow the same
+// ALTER TABLE path on first open after this commit.
 const agentsSchema = `
 CREATE TABLE IF NOT EXISTS agents (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,6 +43,20 @@ CREATE INDEX IF NOT EXISTS agents_backend ON agents(backend);
 CREATE INDEX IF NOT EXISTS agents_parent  ON agents(parent_id);
 CREATE INDEX IF NOT EXISTS agents_active  ON agents(archived_at) WHERE archived_at IS NULL;
 `
+
+// agentsColumnsV2Up lists the ALTER TABLE statements that move a v1
+// agents table to the v2 shape. ALTER TABLE ADD COLUMN is not
+// idempotent in SQLite (errors if the column already exists), so
+// initSchema runs these only when PRAGMA user_version < 2.
+var agentsColumnsV2Up = []string{
+	`ALTER TABLE agents ADD COLUMN instructions    TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE agents ADD COLUMN runtime_config  TEXT NOT NULL DEFAULT '{}'`,
+	`ALTER TABLE agents ADD COLUMN custom_args     TEXT NOT NULL DEFAULT '[]'`,
+	`ALTER TABLE agents ADD COLUMN custom_env      TEXT NOT NULL DEFAULT '{}'`,
+	`ALTER TABLE agents ADD COLUMN mcp_config      TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE agents ADD COLUMN model           TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE agents ADD COLUMN thinking_level  TEXT NOT NULL DEFAULT ''`,
+}
 
 const runsSchema = `
 CREATE TABLE IF NOT EXISTS runs (

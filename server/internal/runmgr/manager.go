@@ -420,6 +420,14 @@ func envSliceToMap(env []string) map[string]string {
 	return out
 }
 
+// GetAgent resolves an agent by name or @id reference and
+// returns the row. Thin wrapper around agentregistry.GetAgent so
+// HTTP handlers do not need to import the registry package
+// directly for read paths.
+func (m *Manager) GetAgent(ctx context.Context, ref string) (agentregistry.Agent, error) {
+	return m.store.GetAgent(ctx, ref)
+}
+
 // GetLatestAudit returns the latest audit row registered for runID,
 // delegating to the registry store. (runID, found, err) is the
 // (RunAudit, exists?, error) tuple. We do not gate on run existence;
@@ -475,6 +483,52 @@ func (m *Manager) ListPendingAudits(ctx context.Context, opts agentregistry.List
 
 // keep strings import alive (used in handleRunAuditRun path above).
 var _ = strings.TrimSpace
+
+// ListAgents delegates to the registry store. opts.IncludeArchived
+// controls whether soft-archived rows are returned; defaults false.
+func (m *Manager) ListAgents(ctx context.Context, opts agentregistry.ListAgentOpts) ([]agentregistry.Agent, error) {
+	return m.store.ListAgents(ctx, opts)
+}
+
+// RegisterAgent validates the input lightly (name + backend required;
+// parent, if present, must resolve to an existing agent) and then
+// inserts. Returns the freshly-inserted row (with assigned ID +
+// timestamps), matching the store's GetAgent wire shape — callers
+// can echo the response body back to the client without an extra fetch.
+func (m *Manager) RegisterAgent(ctx context.Context, a agentregistry.Agent) (agentregistry.Agent, error) {
+	id, err := m.store.RegisterAgent(ctx, a)
+	if err != nil {
+		return agentregistry.Agent{}, err
+	}
+	return m.store.GetAgent(ctx, fmt.Sprintf("@%d", id))
+}
+
+// UpdateAgent applies a partial patch to the agent row and re-reads
+// the row so the caller gets post-write timestamps + archived_at.
+//   - patch.ClearParent=true and patch.ParentID!=nil will both be
+//     rejected here to keep the wire semantics unambiguous.
+func (m *Manager) UpdateAgent(ctx context.Context, id int64, patch agentregistry.AgentPatch) (agentregistry.Agent, error) {
+	if patch.ClearParent && patch.ParentID != nil {
+		return agentregistry.Agent{}, errors.New("runmgr: ClearParent and ParentID are mutually exclusive")
+	}
+	if err := m.store.UpdateAgent(ctx, id, patch); err != nil {
+		return agentregistry.Agent{}, err
+	}
+	return m.store.GetAgent(ctx, fmt.Sprintf("@%d", id))
+}
+
+// ArchiveAgent soft-archives (sets archived_at) and surfaces
+// ErrNotFound when no row matches.
+func (m *Manager) ArchiveAgent(ctx context.Context, id int64) error {
+	return m.store.ArchiveAgent(ctx, id)
+}
+
+// ListAgentsRuns returns the runs for one agent. The manager
+// exposes this as a distinct method so handlers can name it without
+// being mistaken for the run-lifecycle /runs endpoint.
+func (m *Manager) ListAgentRuns(ctx context.Context, agentRef string, opts agentregistry.ListRunOpts) ([]agentregistry.Run, error) {
+	return m.store.ListRuns(ctx, agentRef, opts)
+}
 
 // SetBackendFactory overrides how the Manager builds the backend
 // driver for each StartRun. The default (set in [New]) is

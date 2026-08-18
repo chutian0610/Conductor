@@ -133,10 +133,36 @@ func initSchema(db *sql.DB) error {
 	if _, err := db.Exec(runAuditsSchema); err != nil {
 		return fmt.Errorf("agentregistry: run_audits schema: %w", err)
 	}
+	// v1 -> v2 upgrade: agents table gains the runtime-config columns
+	// (instructions / runtime_config / custom_args / custom_env /
+	// mcp_config / model / thinking_level). ALTER TABLE ADD COLUMN is
+	// not idempotent in SQLite, so the loop is guarded by a user_version
+	// read: only run when the on-disk DB is strictly pre-v2.
+	preVer, err := readUserVersion(db)
+	if err != nil {
+		return fmt.Errorf("agentregistry: pre-version read: %w", err)
+	}
+	if preVer < 2 {
+		for _, alter := range agentsColumnsV2Up {
+			if _, err := db.Exec(alter); err != nil {
+				return fmt.Errorf("agentregistry: agents v2 columns: %w", err)
+			}
+		}
+	}
 	if _, err := db.Exec(`PRAGMA user_version = ` + fmtInt(schemaVersion)); err != nil {
 		return fmt.Errorf("agentregistry: user_version: %w", err)
 	}
 	return nil
+}
+
+// readUserVersion returns the on-disk PRAGMA user_version. Used to
+// gate idempotent-but-not-replayable migrations in initSchema.
+func readUserVersion(db *sql.DB) (int, error) {
+	var v int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		return 0, err
+	}
+	return v, nil
 }
 
 // fmtInt avoids a strconv import just to interpolate a constant.
