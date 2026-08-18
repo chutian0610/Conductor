@@ -58,6 +58,7 @@ streams a uniform event stream back. V1.x adds the agent layer
 	}
 	cmd.AddCommand(runCmd())
 	cmd.AddCommand(agentCmd())
+	cmd.AddCommand(auditCmd())
 	return cmd
 }
 

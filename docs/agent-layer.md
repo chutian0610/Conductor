@@ -61,6 +61,42 @@ the registry by default. The semantics:
 This mirrors multica's stance: the underlying session result remains
 authoritative, the SQLite store is the audit.
 
+
+
+## Audit
+
+Adversarial audits (ADR-0009) let a fresh LLM read a recorded run's
+events and emit a single-line JSON verdict — `pass`, `fail`, or
+`unverifiable` — plus a one-sentence evidence. Trigger manually
+after a run, read the verdict, decide what to do.
+
+```
+conductor audit <run-id> [--json] [--force] [--model <name>]
+conductor audit --pending [--limit N]
+```
+
+`<run-id>` is the integer from `conductor agent runs <agent>` (or
+`conductor audit --pending` to drain a backlog). `--force`
+re-audits an already-audited run; without it the command refuses so
+a CI loop can detect. `--model` overrides which model the auditor
+subprocess uses (default: claude's pick). `--json` emits one JSON
+object per line on stdout for machine consumption; stderr is quiet.
+
+Example human output:
+
+```
+$ conductor audit 42
+audited run #42  verdict=pass
+  evidence: All 7 events are consistent: six 'running' status events
+            followed by a final text event with content 'ok'.
+            No tool errors, no loops.
+  audit_id=2  at=1787031656744
+```
+
+The audit is **judgment, never enforcement**: it never changes the
+run's status, never gates a future `conductor run`, and never drives
+exit code (operators who want CI gating wrap the JSON output in
+their own policy check). Closes followups row #21.
 ## Persistence model
 
 The registry is a SQLite database at `<cwd>/.conductor/registry.db`:

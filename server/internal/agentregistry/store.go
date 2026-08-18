@@ -112,23 +112,48 @@ func buildDSN(cwd string) (dsn string, file string, err error) {
 	return dsn, dbPath, nil
 }
 
-// initSchema applies the DDL once per database. The first Open to a
-// fresh db file sees user_version == 0 and runs the v1 schema; future
-// migrations check user_version and branch from there.
+// initSchema applies the DDL idempotently and updates user_version
+// to schemaVersion. Each block below is CREATE TABLE IF NOT EXISTS,
+// so re-running against an already-migrated database is a no-op. The
+// version branches (v1 → v2) only matter for skipping the write of
+// user_version on databases that predate the constant change.
 func initSchema(db *sql.DB) error {
-	if _, err := db.Exec(agentsSchema); err != nil {
-		return fmt.Errorf("agentregistry: agents schema: %w", err)
+	for _, ddl := range []struct {
+		name, ddl string
+	}{
+		{"agents", agentsSchema},
+		{"runs", runsSchema},
+		{"events", eventsSchema},
+	} {
+		if _, err := db.Exec(ddl.ddl); err != nil {
+			return fmt.Errorf("agentregistry: %s schema: %w", ddl.name, err)
+		}
 	}
-	if _, err := db.Exec(runsSchema); err != nil {
-		return fmt.Errorf("agentregistry: runs schema: %w", err)
+	// v2 migration: run_audits table. Each fresh-DB open runs this;
+	// an existing v1 DB moves to v2 on first open after this commit.
+	if _, err := db.Exec(runAuditsSchema); err != nil {
+		return fmt.Errorf("agentregistry: run_audits schema: %w", err)
 	}
-	if _, err := db.Exec(eventsSchema); err != nil {
-		return fmt.Errorf("agentregistry: events schema: %w", err)
-	}
-	// user_version carries our schema number; the pragmas above and
-	// the three CREATE TABLE statements together form v1.
-	if _, err := db.Exec(`PRAGMA user_version = 1`); err != nil {
+	if _, err := db.Exec(`PRAGMA user_version = ` + fmtInt(schemaVersion)); err != nil {
 		return fmt.Errorf("agentregistry: user_version: %w", err)
 	}
 	return nil
+}
+
+// fmtInt avoids a strconv import just to interpolate a constant.
+func fmtInt(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	if n < 0 {
+		return "-" + fmtInt(-n)
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
 }

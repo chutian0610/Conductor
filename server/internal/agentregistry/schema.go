@@ -62,3 +62,22 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id, seq);
 `
+
+// runAuditsSchema (v2) adds the audit-traversal table. Each row is one
+// audit invocation — re-audits produce additional rows under the same
+// run_id. The schema is independent of `runs` so we can mutate it
+// (e.g. add an `attempt` column for retry numbering) without an
+// agents/runs migration.
+const runAuditsSchema = `
+CREATE TABLE IF NOT EXISTS run_audits (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id        INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    verdict       TEXT    NOT NULL,
+    evidence      TEXT    NOT NULL,
+    auditor_model TEXT    NOT NULL,
+    audited_at    INTEGER NOT NULL,
+    input_sha     TEXT    NOT NULL,
+    prompt_sha    TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS run_audits_run ON run_audits(run_id);
+`

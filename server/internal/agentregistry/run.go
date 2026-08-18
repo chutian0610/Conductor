@@ -324,3 +324,155 @@ func joinIDs(ids []int64) string {
 	}
 	return strings.Join(parts, ",")
 }
+
+
+// ── Run audits (v2) ──────────────────────────────────────────────────────
+
+// RunAudit captures one invocation of the adversarial auditor (see ADR-0009).
+// Multiple rows can exist per run (re-audits); the latest by audited_at
+// is the canonical verdict at read time.
+type RunAudit struct {
+	ID           int64  `json:"id"`
+	RunID        int64  `json:"run_id"`
+	Verdict      string `json:"verdict"`       // pass | fail | unverifiable
+	Evidence     string `json:"evidence"`
+	AuditorModel string `json:"auditor_model"` // what model the auditor LLM was invoked with
+	AuditedAt    int64  `json:"audited_at"`    // unix ms
+	InputSHA     string `json:"input_sha"`      // sha256 of the transcript fed to the auditor
+	PromptSHA    string `json:"prompt_sha"`     // sha256 of the auditor system prompt
+}
+
+// StartAudit inserts a pending audit row and returns its id.
+// Caller must follow up with FinishAudit once the auditor LLM has
+// returned (or fallen into a parse-failure fallback). Called audit rows
+// are intentional so a crash mid-audit still leaves a recoverable
+// row — operator can inspect `run_audits` directly to see how far a
+// previous audit got.
+func (s *Store) StartAudit(ctx context.Context, a RunAudit) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+        INSERT INTO run_audits(run_id, verdict, evidence,
+                                auditor_model, audited_at,
+                                input_sha, prompt_sha)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		a.RunID,
+		"pending",                          // provisional verdict
+		"",                                 // provisional evidence
+		a.AuditorModel,
+		a.AuditedAt,
+		a.InputSHA,
+		a.PromptSHA,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("agentregistry: start audit: %w", err)
+	}
+	return res.LastInsertId()
+}
+
+// FinishAudit sets the verdict + evidence on a row that StartAudit
+// previously inserted. Calling on an already-completed audit is a
+// no-op (intentionally not enforced — same as FinishRun).
+func (s *Store) FinishAudit(ctx context.Context, auditID int64, verdict, evidence string) error {
+	if _, err := s.db.ExecContext(ctx, `
+        UPDATE run_audits
+           SET verdict = ?, evidence = ?, audited_at = ?
+         WHERE id = ?`,
+		verdict, evidence, time.Now().UnixMilli(), auditID,
+	); err != nil {
+		return fmt.Errorf("agentregistry: finish audit: %w", err)
+	}
+	return nil
+}
+
+// GetLatestAudit returns the most recent audit for a run, plus a bool
+// "found". When the run has never been audited, returns (RunAudit{}, false, nil).
+func (s *Store) GetLatestAudit(ctx context.Context, runID int64) (RunAudit, bool, error) {
+	row := s.db.QueryRowContext(ctx, `
+        SELECT id, run_id, verdict, evidence, auditor_model, audited_at,
+               input_sha, prompt_sha
+          FROM run_audits
+         WHERE run_id = ?
+         ORDER BY audited_at DESC, id DESC
+         LIMIT 1`, runID)
+	a, err := scanAudit(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RunAudit{}, false, nil
+	}
+	if err != nil {
+		return RunAudit{}, false, fmt.Errorf("agentregistry: get latest audit: %w", err)
+	}
+	return a, true, nil
+}
+
+// ListAuditsForRun returns every audit row for a run, newest first.
+func (s *Store) ListAuditsForRun(ctx context.Context, runID int64) ([]RunAudit, error) {
+	rows, err := s.db.QueryContext(ctx, `
+        SELECT id, run_id, verdict, evidence, auditor_model, audited_at,
+               input_sha, prompt_sha
+          FROM run_audits
+         WHERE run_id = ?
+         ORDER BY audited_at DESC, id DESC`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("agentregistry: list audits: %w", err)
+	}
+	defer rows.Close()
+	out := []RunAudit{}
+	for rows.Next() {
+		a, err := scanAudit(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// ListPendingAudits returns runs whose latest audit is absent or
+// pending. Used by `conductor audit --pending` so operators can drain
+// the backlog after a batch run.
+func (s *Store) ListPendingAudits(ctx context.Context, opts ListRunOpts) ([]int64, error) {
+	q := strings.Builder{}
+	q.WriteString(`
+        SELECT r.id FROM runs r
+         LEFT JOIN (
+             SELECT run_id, MAX(audited_at) AS max_at
+               FROM run_audits
+              GROUP BY run_id
+         ) la ON la.run_id = r.id
+        WHERE la.run_id IS NULL
+           OR EXISTS (
+               SELECT 1 FROM run_audits a
+                WHERE a.run_id = r.id
+                  AND a.verdict = 'pending'
+           )`)
+	args := []any{}
+	if opts.Limit > 0 {
+		q.WriteString(" ORDER BY r.id ASC LIMIT ?")
+		args = append(args, opts.Limit)
+	}
+	rows, err := s.db.QueryContext(ctx, q.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("agentregistry: list pending: %w", err)
+	}
+	defer rows.Close()
+	out := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// scanAudit reads one audit row from either a *sql.Row or *sql.Rows.
+func scanAudit(s scanner) (RunAudit, error) {
+	var a RunAudit
+	if err := s.Scan(
+		&a.ID, &a.RunID, &a.Verdict, &a.Evidence, &a.AuditorModel,
+		&a.AuditedAt, &a.InputSHA, &a.PromptSHA,
+	); err != nil {
+		return a, err
+	}
+	return a, nil
+}
