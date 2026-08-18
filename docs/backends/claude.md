@@ -183,3 +183,31 @@ provides a logger helper and a temp-file helper. Adding a
 with a `*_integration_test.go` per backend is the recommended next
 step to lift `internal/backend` coverage and close the gap between the
 argv unit tests and the actual `Execute()` lifecycle.
+
+
+### Thinking / extended-thinking blocks
+
+Claude Code's wire format includes `thinking` content blocks in
+assistant messages when extended thinking is enabled. Conductor's
+claude backend already maps these to `Message{Type: MessageThinking,
+Content: <text>}` (`internal/backend/claude.go` `case "thinking"` arm)
+and the renderer prints them on stderr as `… <truncated>`. The
+events table records each block.
+
+Upstream caveat (verified live, see
+`internal/backend/livesmoke_thinking_test.go`): as of Claude Code
+2.1.215, the main agent's thinking blocks are NOT forwarded to stdout
+in stream-json output. The CLI flag `--effort <level>` controls
+model effort but does not stream thinking on stdout. The only flag
+that currently surfaces thinking blocks is
+`--forward-subagent-text`, and that applies to SUBAGENT runs, not
+the main agent.
+
+Conductor therefore installs the parser / renderer / registry path
+ahead of upstream support — a future Claude Code release that
+forwards main-agent thinking on stdout will Just Work without code
+changes. The live test in `livesmoke_thinking_test.go` is a doc-by-
+test for this state: it runs `--effort medium`, asserts zero or more
+MessageThinking events, and only `t.Log`s (does not t.Fatalf) so
+the assertion flips to "upstream now forwards" rather than breaking
+the build.
