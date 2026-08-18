@@ -50,6 +50,8 @@ func New(addr, token string, logger *slog.Logger, mgr *runmgr.Manager) (*Server,
 	mux.HandleFunc("/v1/runs", s.handleRunsListOrStart) // method-dispatch
 	mux.HandleFunc("/v1/runs/", s.handleRunSubrouter)
 	mux.HandleFunc("/v1/audits/pending", s.handleAuditsPending)
+	mux.HandleFunc("/v1/agents", s.handleAgentsListOrCreate) // method-dispatch
+	mux.HandleFunc("/v1/agents/", s.handleAgentSubrouter)
 
 	s.http = &http.Server{
 		Handler:      s.authMiddleware(mux),

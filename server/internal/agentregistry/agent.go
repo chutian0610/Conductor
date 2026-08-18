@@ -3,6 +3,7 @@ package agentregistry
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -13,28 +14,64 @@ import (
 // Agent is a registered entity in the registry. It is the
 // operator-facing abstraction; one Agent has many Runs.
 type Agent struct {
-	ID          int64      `json:"id"`
-	Name        string     `json:"name"`
-	Description string     `json:"description"`
-	Backend     string     `json:"backend"`
-	ParentID    int64      `json:"parent_id,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
-	ArchivedAt  *time.Time `json:"archived_at,omitempty"`
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Backend     string `json:"backend"`
+	ParentID    int64  `json:"parent_id,omitempty"`
+	// Instructions is the agent's natural-language directive read
+	// by the backend driver at runtime. Persisted as raw text;
+	// rendering is the renderer's job (not the registry's).
+	Instructions string `json:"instructions,omitempty"`
+	// RuntimeConfig is a freeform JSON blob that the renderer / agent
+	// runtime may consume. Stored as a string so the registry does
+	// not depend on a JSON column type; callers marshal/unmarshal
+	// when they want strongly-typed access.
+	RuntimeConfig json.RawMessage `json:"runtime_config,omitempty"`
+	// CustomArgs / CustomEnv / McpConfig are per-agent overrides
+	// that the runtime layer applies at spawn time. JSON-encoded so
+	// the wire shape matches multica's CLI / API.
+	CustomArgs json.RawMessage `json:"custom_args,omitempty"`
+	CustomEnv  json.RawMessage `json:"custom_env,omitempty"`
+	McpConfig  json.RawMessage `json:"mcp_config,omitempty"`
+	// Model is the canonical model identifier the operator selected
+	// (empty means "runtime default"). Indexed for filter queries.
+	Model string `json:"model,omitempty"`
+	// ThinkingLevel mirrors multica's `thinking_level` field:
+	// backend-native effort value, runtime-specific catalog.
+	ThinkingLevel string     `json:"thinking_level,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+	ArchivedAt    *time.Time `json:"archived_at,omitempty"`
 }
 
 // AgentPatch captures optional updates to mutate an existing agent.
 // Only non-nil pointer fields are written; "" / 0 means "no change".
 type AgentPatch struct {
-	Description *string
-	Backend     *string
-	ParentID    *int64
-	ClearParent bool
+	Description  *string
+	Backend      *string
+	ParentID     *int64
+	ClearParent  bool
+	Instructions *string
+	// RuntimeConfig / CustomArgs / CustomEnv / McpConfig accept a
+	// json.RawMessage so callers can ship raw bytes through the
+	// store layer. Validation (e.g. "must be a JSON object") is the
+	// caller's responsibility — the registry stores bytes verbatim.
+	RuntimeConfig json.RawMessage
+	CustomArgs    json.RawMessage
+	CustomEnv     json.RawMessage
+	McpConfig     json.RawMessage
+	Model         *string
+	ThinkingLevel *string
 }
 
 // ListAgentOpts filters ListAgents.
 type ListAgentOpts struct {
-	Backend         string // empty = any
+	Backend string // empty = any
+	// Model filters agents whose model is exactly Model. Empty
+	// means "no model filter" (matched against model != '' for
+	// efficiency: indexed in schema.go).
+	Model           string
 	IncludeArchived bool
 }
 
@@ -52,12 +89,22 @@ func (s *Store) RegisterAgent(ctx context.Context, a Agent) (int64, error) {
 	}
 	now := time.Now().UnixMilli()
 	res, err := s.db.ExecContext(ctx, `
-        INSERT INTO agents(name, description, backend, parent_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)`,
+        INSERT INTO agents(
+            name, description, backend, parent_id, instructions,
+            runtime_config, custom_args, custom_env, mcp_config,
+            model, thinking_level, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		strings.TrimSpace(a.Name),
 		a.Description,
 		a.Backend,
 		nullInt(a.ParentID),
+		a.Instructions,
+		rawOr(a.RuntimeConfig, "{}"),
+		rawOr(a.CustomArgs, "[]"),
+		rawOr(a.CustomEnv, "{}"),
+		rawOr(a.McpConfig, ""),
+		a.Model,
+		a.ThinkingLevel,
 		now, now,
 	)
 	if err != nil {
@@ -114,6 +161,34 @@ func (s *Store) UpdateAgent(ctx context.Context, id int64, patch AgentPatch) err
 		q.WriteString(", parent_id = ?")
 		args = append(args, *patch.ParentID)
 	}
+	if patch.Instructions != nil {
+		q.WriteString(", instructions = ?")
+		args = append(args, *patch.Instructions)
+	}
+	if patch.RuntimeConfig != nil {
+		q.WriteString(", runtime_config = ?")
+		args = append(args, rawOr(patch.RuntimeConfig, "{}"))
+	}
+	if patch.CustomArgs != nil {
+		q.WriteString(", custom_args = ?")
+		args = append(args, rawOr(patch.CustomArgs, "[]"))
+	}
+	if patch.CustomEnv != nil {
+		q.WriteString(", custom_env = ?")
+		args = append(args, rawOr(patch.CustomEnv, "{}"))
+	}
+	if patch.McpConfig != nil {
+		q.WriteString(", mcp_config = ?")
+		args = append(args, string(patch.McpConfig))
+	}
+	if patch.Model != nil {
+		q.WriteString(", model = ?")
+		args = append(args, *patch.Model)
+	}
+	if patch.ThinkingLevel != nil {
+		q.WriteString(", thinking_level = ?")
+		args = append(args, *patch.ThinkingLevel)
+	}
 	q.WriteString(" WHERE id = ?")
 	args = append(args, id)
 
@@ -164,7 +239,10 @@ func (s *Store) GetAgent(ctx context.Context, ref string) (Agent, error) {
 	if err != nil {
 		return Agent{}, err
 	}
-	q := `SELECT id, name, description, backend, parent_id, created_at, updated_at, archived_at
+	q := `SELECT id, name, description, backend, parent_id,
+               instructions, runtime_config, custom_args, custom_env,
+               mcp_config, model, thinking_level,
+               created_at, updated_at, archived_at
           FROM agents WHERE `
 	if isID {
 		q += "id = ?"
@@ -187,12 +265,18 @@ func (s *Store) GetAgent(ctx context.Context, ref string) (Agent, error) {
 func (s *Store) ListAgents(ctx context.Context, opts ListAgentOpts) ([]Agent, error) {
 	q := strings.Builder{}
 	q.WriteString(`SELECT id, name, description, backend, parent_id,
+                          instructions, runtime_config, custom_args, custom_env,
+                          mcp_config, model, thinking_level,
                           created_at, updated_at, archived_at
                    FROM agents WHERE 1=1`)
 	args := []any{}
 	if opts.Backend != "" {
 		q.WriteString(" AND backend = ?")
 		args = append(args, opts.Backend)
+	}
+	if opts.Model != "" {
+		q.WriteString(" AND model = ?")
+		args = append(args, opts.Model)
 	}
 	if !opts.IncludeArchived {
 		q.WriteString(" AND archived_at IS NULL")
@@ -223,14 +307,36 @@ func scanAgent(s scanner) (Agent, error) {
 		a         Agent
 		parentID  sql.NullInt64
 		archived  sql.NullInt64
+		rtCfg     sql.NullString
+		custArgs  sql.NullString
+		custEnv   sql.NullString
+		mcpCfg    sql.NullString
 		createdAt int64
 		updatedAt int64
 	)
 	if err := s.Scan(
 		&a.ID, &a.Name, &a.Description, &a.Backend, &parentID,
+		&a.Instructions, &rtCfg, &custArgs, &custEnv, &mcpCfg,
+		&a.Model, &a.ThinkingLevel,
 		&createdAt, &updatedAt, &archived,
 	); err != nil {
 		return a, err
+	}
+	// JSON columns are stored as raw TEXT. Empty string means
+	// the caller did not supply this field; we mirror that as
+	// an empty RawMessage (matches the wire-shape "omitempty"
+	// behavior so the field is not echoed back unless set).
+	if rtCfg.Valid && rtCfg.String != "" {
+		a.RuntimeConfig = json.RawMessage(rtCfg.String)
+	}
+	if custArgs.Valid && custArgs.String != "" {
+		a.CustomArgs = json.RawMessage(custArgs.String)
+	}
+	if custEnv.Valid && custEnv.String != "" {
+		a.CustomEnv = json.RawMessage(custEnv.String)
+	}
+	if mcpCfg.Valid && mcpCfg.String != "" {
+		a.McpConfig = json.RawMessage(mcpCfg.String)
 	}
 	if parentID.Valid {
 		a.ParentID = parentID.Int64
@@ -293,4 +399,16 @@ func nullInt(id int64) any {
 
 func unixMilli(ms int64) time.Time {
 	return time.UnixMilli(ms).UTC()
+}
+
+// rawOr returns a JSON-text default (`{}` or `[]`) when the input
+// raw bytes are empty. Registers stored both as text columns AND as
+// the wire-shape form on Agent (json.RawMessage) — empty/nil here means
+// "no value supplied", so we persist the zero-value JSON so the field
+// always round-trips to a parseable JSON token.
+func rawOr(r json.RawMessage, def string) string {
+	if len(r) == 0 {
+		return def
+	}
+	return string(r)
 }
