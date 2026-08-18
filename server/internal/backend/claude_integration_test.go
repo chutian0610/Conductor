@@ -437,3 +437,88 @@ func TestClaudeIntegration_ResumeFallback_OnPermanentSessionLoss(t *testing.T) {
 		t.Errorf("fallback did not clear ResumeSessionID thr-prev; argv: %v", args)
 	}
 }
+
+// TestClaudeIntegration_ThinkingEmitsMessageThinking verifies that a
+// wire assistant message containing `{"type":"thinking", ...}` blocks
+// — Claude Code's extended-thinking payload — surfaces as
+// MessageType=MessageThinking on the session channel.
+//
+// Exercises the case the renderer relies on: when `agent.thinking:` is
+// set in the YAML, the model streams a thinking block first and the
+// answer block after. The conductor renderer uses `... <truncated>`
+// for these; the registry records each block as one event row.
+func TestClaudeIntegration_ThinkingEmitsMessageThinking(t *testing.T) {
+	binary := MustBuildFakeBinary(t, "fake-claude")
+	script := WriteScript(t, t.TempDir(), "thinking.jsonl", []ScriptStep{
+		{Event: systemInitEvent},
+		{DelayMs: 5, Event: json.RawMessage(
+			`{"type":"assistant","message":{"role":"assistant",` +
+				`"content":[` +
+				`{"type":"thinking","text":"let me think about this prompt first"},` +
+				`{"type":"text","text":"the answer is 42"}` +
+				`]}}`,
+		)},
+		// Second turn: only thinking, no text. Make sure thinking-only
+		// blocks also surface (assistant turn must still complete).
+		{DelayMs: 5, Event: json.RawMessage(
+			`{"type":"assistant","message":{"role":"assistant",` +
+				`"content":[{"type":"thinking","text":"second turn reasoning"}]}}`,
+		)},
+		{DelayMs: 5, Event: json.RawMessage(
+			`{"type":"result","subtype":"success","is_error":false,` +
+				`"duration_ms":18,"session_id":"sess-fake",` +
+				`"result":"the answer is 42","num_turns":1}`,
+		)},
+	})
+
+	backend, err := New("claude", Config{
+		ExecutablePath: binary,
+		Logger:         testLogger(t),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	session, err := backend.Execute(context.Background(), "say hi", ExecOptions{
+		MaxTurns:   1,
+		Timeout:    10 * time.Second,
+		CustomArgs: []string{"--script", script},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	var thinking, text []Message
+	for m := range session.Messages {
+		switch m.Type {
+		case MessageThinking:
+			thinking = append(thinking, m)
+		case MessageText:
+			text = append(text, m)
+		}
+	}
+	res := <-session.Result
+	if res.Status != "completed" {
+		t.Fatalf("status: got %q want completed (err=%q)", res.Status, res.Error)
+	}
+
+	if len(thinking) != 2 {
+		t.Fatalf("thinking events: got %d want 2; events: %v", len(thinking), thinking)
+	}
+	if len(text) != 1 {
+		t.Fatalf("text events: got %d want 1; events: %v", len(text), text)
+	}
+	if thinking[0].Content != "let me think about this prompt first" {
+		t.Errorf("first thinking content wrong: %q", thinking[0].Content)
+	}
+	if thinking[1].Content != "second turn reasoning" {
+		t.Errorf("second thinking content wrong: %q", thinking[1].Content)
+	}
+	if text[0].Content != "the answer is 42" {
+		t.Errorf("text content wrong: %q", text[0].Content)
+	}
+	// Ordering: thinking-1 (turn 1) should come before text-1 (turn 1
+	// answer), and thinking-2 (turn 2) after that.
+	if thinking[0].Content == "" || text[0].Content == "" {
+		t.Fatal("sanity: content should not be empty")
+	}
+}
