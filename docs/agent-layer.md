@@ -97,7 +97,7 @@ The audit is **judgment, never enforcement**: it never changes the
 run's status, never gates a future `conductor run`, and never drives
 exit code (operators who want CI gating wrap the JSON output in
 their own policy check). Closes followups row #21.
-### HTTP
+### Audit over HTTP
 
 The same audit surface is reachable over the V2 HTTP transport
 (ADR-0010). All endpoints are bearer-token authenticated
@@ -122,7 +122,7 @@ the HTTP surface: there is no `/v1/runs/{id}/audit:retry` or
 similar endpoint that would let one audit drive the run's
 outcome downstream.
 
-### HTTP
+## Agents over HTTP
 
 The agent CRUD surface is reachable over the V2 HTTP transport
 (ADR-0010 §4). Bearer-token auth (per `conductor serve --token-out`),
