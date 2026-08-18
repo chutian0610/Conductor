@@ -437,4 +437,3 @@ func TestClaudeIntegration_ResumeFallback_OnPermanentSessionLoss(t *testing.T) {
 		t.Errorf("fallback did not clear ResumeSessionID thr-prev; argv: %v", args)
 	}
 }
-

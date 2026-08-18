@@ -23,7 +23,9 @@ import (
 //	{"type":"turn.started"}                                — turn begins
 //	{"type":"item.started","item":{...}}                   — item starts
 //	  item.type = "agent_message"      → MessageText
-////	  item.type = "command_execution"  → MessageToolUse {Tool: "Bash", CallID}
+//
+// //	  item.type = "command_execution"  → MessageToolUse {Tool: "Bash", CallID}
+//
 //	  item.type = "error"              → MessageError
 //	{"type":"item.completed","item":{...}}                 — item finished
 //	  item.type = "command_execution"  → MessageToolResult {CallID, Output}
@@ -38,7 +40,7 @@ import (
 // V1.1 scope: single attempt, no resume, no MCP, no retries.
 // V1.2 added:   resume subcommand + model override (-m) + auto-fallback
 //
-////
+// //
 // The protocol is structurally identical to Claude's stream-json, so
 // codex.go mirrors claude.go's structure almost line-for-line. The big
 // differences are:

@@ -27,20 +27,20 @@ import (
 	"strings"
 	"syscall"
 
-	"conductor/server/internal/backend"
 	"conductor/server/internal/agentregistry"
 	"conductor/server/internal/ansiclean"
+	"conductor/server/internal/backend"
 	"conductor/server/internal/configschema"
 
 	"github.com/spf13/cobra"
 )
-
 
 // Char-budget used by renderMessage to clip long LLM tool
 // outputs before they reach the operator's terminal. Lifted from
 // the inline numeric literal so the value is visible at the call
 // site and assertable in tests without rebuilding golden strings.
 const toolOutputPreviewChars = 400
+
 func main() {
 	if err := root().Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "conductor:", err)

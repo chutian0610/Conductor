@@ -17,11 +17,11 @@ import (
 // `conductor audit --pending`.
 func auditCmd() *cobra.Command {
 	var (
-		asJSON bool
-		force  bool
-		model  string
+		asJSON  bool
+		force   bool
+		model   string
 		pending bool
-		limit  int
+		limit   int
 	)
 	c := &cobra.Command{
 		Use:   "audit <run-id> [--json] [--force] [--model <name>]\n       audit --pending [--limit N] [--json]",

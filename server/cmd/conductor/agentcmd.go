@@ -12,8 +12,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"conductor/server/internal/backend"
 	"conductor/server/internal/agentregistry"
+	"conductor/server/internal/backend"
 	"conductor/server/internal/configschema"
 
 	"github.com/spf13/cobra"

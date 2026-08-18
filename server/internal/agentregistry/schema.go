@@ -8,6 +8,7 @@ package agentregistry
 //   - agents   ≈ goals     (a registered entity the operator can launch)
 //   - runs     ≈ tasks     (one execution of an agent)
 //   - events   ≈ audit_log (one observation per agent event)
+//
 // We add `parent_id` / `parent_run_id` to express sub-agent spawn
 // structure that multica captures only via env vars.
 const (

@@ -88,7 +88,6 @@ func (s *Store) Close() error {
 	return err
 }
 
-
 // buildDSN composes the modernc.org/sqlite DSN. For on-disk registries
 // we use file:<path>?_pragma=... so each connection sees the same
 // journal mode, busy timeout, and foreign-key settings.

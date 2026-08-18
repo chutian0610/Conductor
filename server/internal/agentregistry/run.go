@@ -238,8 +238,8 @@ func (s *Store) Events(ctx context.Context, runID int64) ([]Event, error) {
 	out := []Event{}
 	for rows.Next() {
 		var (
-			e      Event
-			ts     int64
+			e       Event
+			ts      int64
 			payload sql.RawBytes
 		)
 		if err := rows.Scan(&e.ID, &e.RunID, &e.Seq, &ts, &e.Kind, &payload); err != nil {
@@ -325,7 +325,6 @@ func joinIDs(ids []int64) string {
 	return strings.Join(parts, ",")
 }
 
-
 // ── Run audits (v2) ──────────────────────────────────────────────────────
 
 // RunAudit captures one invocation of the adversarial auditor (see ADR-0009).
@@ -334,12 +333,12 @@ func joinIDs(ids []int64) string {
 type RunAudit struct {
 	ID           int64  `json:"id"`
 	RunID        int64  `json:"run_id"`
-	Verdict      string `json:"verdict"`       // pass | fail | unverifiable
+	Verdict      string `json:"verdict"` // pass | fail | unverifiable
 	Evidence     string `json:"evidence"`
 	AuditorModel string `json:"auditor_model"` // what model the auditor LLM was invoked with
 	AuditedAt    int64  `json:"audited_at"`    // unix ms
-	InputSHA     string `json:"input_sha"`      // sha256 of the transcript fed to the auditor
-	PromptSHA    string `json:"prompt_sha"`     // sha256 of the auditor system prompt
+	InputSHA     string `json:"input_sha"`     // sha256 of the transcript fed to the auditor
+	PromptSHA    string `json:"prompt_sha"`    // sha256 of the auditor system prompt
 }
 
 // StartAudit inserts a pending audit row and returns its id.
@@ -355,8 +354,8 @@ func (s *Store) StartAudit(ctx context.Context, a RunAudit) (int64, error) {
                                 input_sha, prompt_sha)
         VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		a.RunID,
-		"pending",                          // provisional verdict
-		"",                                 // provisional evidence
+		"pending", // provisional verdict
+		"",        // provisional evidence
 		a.AuditorModel,
 		a.AuditedAt,
 		a.InputSHA,

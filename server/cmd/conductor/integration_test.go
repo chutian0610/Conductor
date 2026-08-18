@@ -11,9 +11,9 @@ import (
 	"runtime"
 	"testing"
 
+	"conductor/server/internal/agentregistry"
 	"conductor/server/internal/backend"
 	"conductor/server/internal/backend/testbinaries/binrunner"
-	"conductor/server/internal/agentregistry"
 	"conductor/server/internal/configschema"
 )
 
@@ -290,11 +290,11 @@ func TestRun_ExistingAgentReused(t *testing.T) {
 	// Second run with same name; new schema instance to mimic a
 	// second CLI invocation.
 	schema2 := schemaFromFields(t, "reused", "claude", "different description (should be ignored)", bin)
-	reg2, rec2, err := openRecorderForRun /* alias */(true, schema2, "p2\n", dir)
+	reg2, rec2, err := openRecorderForRun /* alias */ (true, schema2, "p2\n", dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reg.Close()  // single dir for both calls
+	defer reg.Close() // single dir for both calls
 	if err := runExecuteBackendAgainstFake(t, schema2, rec2); err != nil {
 		t.Fatalf("run #2: %v", err)
 	}

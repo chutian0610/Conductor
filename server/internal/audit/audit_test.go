@@ -10,10 +10,10 @@ import (
 
 func TestParseVerdict_HappyPath(t *testing.T) {
 	cases := []struct {
-		name       string
-		in         string
-		wantVerd   string
-		wantEvid   string
+		name     string
+		in       string
+		wantVerd string
+		wantEvid string
 	}{
 		{
 			"pass",
@@ -164,15 +164,14 @@ func TestRenderTranscript_TruncatesAtCap(t *testing.T) {
 	}
 }
 
-
 func agentregistryRunFixture() agentregistry.Run {
 	return agentregistry.Run{
-		ID:        42,
-		AgentID:   7,
-		Status:    "completed",
-		StartedAt: time.UnixMilli(1700000000000),
+		ID:         42,
+		AgentID:    7,
+		Status:     "completed",
+		StartedAt:  time.UnixMilli(1700000000000),
 		DurationMs: 1234,
-		SessionID: "sess-fixture",
-		PromptSHA: "abcd",
+		SessionID:  "sess-fixture",
+		PromptSHA:  "abcd",
 	}
 }
