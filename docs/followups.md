@@ -40,8 +40,8 @@ the ADR owns the rationale.
 
 | # | Item | ADR |
 |---|---|---|
-| 12 | HTTP transport layer (`internal/http/`, streaming event endpoint, lifecycle hooks) | [ADR-0001](adr/0001-v1-cli-only-no-http.md) |
-| 13 | DAG scheduler that triggers runs through the HTTP layer | [ADR-0001](adr/0001-v1-cli-only-no-http.md) |
+| 12 | V2 HTTP transport (design shipped in ADR-0010; code follows the §9 5-step order — minimum daemon → audit endpoints → agent CRUD via HTTP → file watcher). The endpoint table, SSE streaming format, auth model, and non-goals are pinned. | [ADR-0010](adr/0010-v2-http-transport.md) | in progress |
+| 13 | DAG scheduler that triggers runs through the HTTP layer (HTTP design shipped in ADR-0010; DAG itself is the next implementation step) | [ADR-0010](adr/0010-v2-http-transport.md) §9 step 1+ | unblocked |
 | 15 | Re-evaluate `codex app-server` (websocket) if it becomes the only Codex mode | [ADR-0002](adr/0002-codex-exec-json-not-app-server.md) |
 | 16 | Windows process-group / Job Object support | [ADR-0003](adr/0003-refuse-windows-run-time.md) |
 | 17 | New top-level YAML sections (`plan:`, `dag:`) | [ADR-0004](adr/0004-strict-yaml-schema.md) |
