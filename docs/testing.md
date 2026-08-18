@@ -117,7 +117,6 @@ Per-function highlights (low-coverage functions worth watching):
 |---|---|---|---|
 | `releaseProcessGroup`           | `proc_other.go`            | 0.0% | Non-Windows-only helper; integration tests exercise the surrounding flow but the helper's no-process-group path is unreachable on macOS |
 | `claudeTerminalReasonFailure`   | `claude.go`                | 0.0% | Terminal-reason classification helper; needs a `result` event with `terminal_reason: "max_turns"` or similar |
-| `claudeToolResultHasAsyncLaunch` + array + map variants | `claude.go` | 0.0% each | Async-launch detection; needs a `user` event with `tool_use_result.is_async_launch: true` |
 | `Run`                          | `binrunner.go`             | 0.0% | The runner's `Run` calls `os.Exit` and is only covered by re-exec via the integration tests; in-process tests cover its helpers but not the top-level entrypoint |
 | `drainStdin`                   | `binrunner.go`             | 0.0% | Background drain goroutine; covered indirectly by `_WritesStdin` and `_ControlRequest_*` (which poll the drain file), but `drainStdin` itself is never asserted on directly |
 | `hideAgentWindow`              | `proc_other.go`            | 0.0% | macOS-only; non-Windows build does nothing here |
@@ -127,22 +126,16 @@ Per-function highlights (low-coverage functions worth watching):
 
 ## Known gaps
 
-1. **Async-launch tool result handling.** `claudeToolResultHasAsyncLaunch`
-   and its two array/map variants are at 0%. They detect when a
-   Claude `user` event carries an async tool launch and route the
-   result. Adding a `user`-event scenario in `claude_integration_test.go`
-   would close this — but the runtime branch that consumes the
-   detection is also untested, so this needs both a scenario and a
-   review of what conductor does with the result.
-2. **MCP temp-file error branches.** `writeMcpConfigToTemp` has two
+
+1. **MCP temp-file error branches.** `writeMcpConfigToTemp` has two
    uncovered error paths (mkdir / writefile failure). Closing them
    needs a write-protected `TMPDIR` or a fault-injection hook on
    the test's `McpConfig` payload.
-3. **`releaseProcessGroup` is unreachable on macOS without
+2. **`releaseProcessGroup` is unreachable on macOS without
    `setpgid`.** A platform-specific test that spawns under a
    custom process group and asserts the helper's signal would close
    the gap; deferred until we have a CI matrix covering Linux.
-4. **cmd/conductor renderer is at 0%.** `renderMessage` /
+3. **cmd/conductor renderer is at 0%.** `renderMessage` /
    `renderResult` / `emitUsage` / `emitJSON` / `truncate` handle
    the user-facing CLI output. Pure stdlib output, mostly table-
    driven golden tests. Worth landing as a V1.x follow-up.

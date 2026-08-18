@@ -19,7 +19,6 @@ exercise or ship. Each row points at the source of truth.
 
 | # | Item | Source of truth | Effort |
 |---|---|---|---|
-| 2 | Async-launch tool result handling — `claudeToolResultHasAsyncLaunch` + array/map variants all 0% | `docs/testing.md` "Known gaps" #1; `server/internal/backend/claude.go:724-770` | ~1h (one integration scenario + one scenario asserting the runtime branch) |
 | 5 | `shouldFallbackToFreshSession` "permanent loss" is now covered end-to-end; the 14.3% gap is the empty-`ResumeContinuityNotice` arm that the integration layer can't drive (it short-circuits the retry before the second attempt). A unit test for it is in `coverage_test.go` already; nothing else to do. | `server/internal/backend/resume_fallback.go:36` | — (closed) |
 | 7 | `releaseProcessGroup` unreachable on macOS without `setpgid`; needs a Linux CI matrix to cover | `server/internal/backend/proc_other.go:35`; `docs/testing.md` "Known gaps" #3 | blocked on CI matrix |
 | 8 | `providerNeedsInlineSystemPrompt` "default false" is asserted in `coverage_test.go`; new providers will need a one-line case + test | `server/internal/backend/runtime_config.go:31` | ~5m per provider |

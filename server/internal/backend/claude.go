@@ -253,11 +253,7 @@ func (b *claudeBackend) runOneAttempt(
 			}
 			lastAssistantText = turn.resolveFallback(lastAssistantText)
 		case "user":
-			if handleClaudeUser(msg, msgCh) {
-				// Detected async background launch — refused.
-				b.cfg.Logger.Warn("claude launched an async tool; not allowed in conductor mode",
-					"tool_use_id", msg.RequestID)
-			}
+			handleClaudeUser(msg, msgCh)
 		case "result":
 			sawResult = true
 			finalResultText = msg.ResultText
@@ -549,29 +545,32 @@ func handleClaudeAssistant(msg claudeSDKMessage, ch chan<- Message, usage map[st
 	return turn
 }
 
-func handleClaudeUser(msg claudeSDKMessage, ch chan<- Message) bool {
+// handleClaudeUser emits MessageToolResult events for each tool_result
+// block in a `user` frame. There is intentionally no async-launch
+// detection: conductor waits for the CLI's terminal `result` event,
+// by which point Claude Code has either resolved the tool or surfaced
+// a meaningful failure. Speculating about async background launches
+// here would add a helper for a case conductor cannot act on (the
+// CLI drives tool completion; we only observe the wire).
+func handleClaudeUser(msg claudeSDKMessage, ch chan<- Message) {
 	var content claudeMessageContent
 	if err := json.Unmarshal(msg.Message, &content); err != nil {
-		return false
+		return
 	}
-	sawAsyncLaunch := false
 	for _, block := range content.Content {
-		if block.Type == "tool_result" {
-			resultStr := ""
-			if block.Content != nil {
-				resultStr = string(block.Content)
-				if claudeToolResultHasAsyncLaunch(block.Content) {
-					sawAsyncLaunch = true
-				}
-			}
-			trySend(ch, Message{
-				Type:   MessageToolResult,
-				CallID: block.ToolUseID,
-				Output: resultStr,
-			})
+		if block.Type != "tool_result" {
+			continue
 		}
+		var resultStr string
+		if block.Content != nil {
+			resultStr = string(block.Content)
+		}
+		trySend(ch, Message{
+			Type:   MessageToolResult,
+			CallID: block.ToolUseID,
+			Output: resultStr,
+		})
 	}
-	return sawAsyncLaunch
 }
 
 func handleClaudeControlRequest(msg claudeSDKMessage, stdin io.Writer, logger *slog.Logger) {
@@ -735,42 +734,6 @@ func writeClaudeInput(w io.Writer, prompt string) error {
 	data = append(data, '\n')
 	_, err = w.Write(data)
 	return err
-}
-
-func claudeToolResultHasAsyncLaunch(raw json.RawMessage) bool {
-	if len(raw) == 0 {
-		return false
-	}
-	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return false
-	}
-	switch x := v.(type) {
-	case map[string]any:
-		if claudeMapHasAsyncLaunchStatus(x) {
-			return true
-		}
-		if content, ok := x["content"].([]any); ok {
-			return claudeArrayHasAsyncLaunchStatus(content)
-		}
-	case []any:
-		return claudeArrayHasAsyncLaunchStatus(x)
-	}
-	return false
-}
-
-func claudeArrayHasAsyncLaunchStatus(values []any) bool {
-	for _, v := range values {
-		if item, ok := v.(map[string]any); ok && claudeMapHasAsyncLaunchStatus(item) {
-			return true
-		}
-	}
-	return false
-}
-
-func claudeMapHasAsyncLaunchStatus(v map[string]any) bool {
-	status, ok := v["status"].(string)
-	return ok && status == "async_launched"
 }
 
 // ── Helpers shared with codex (and any future JSON-stream backend) ────
