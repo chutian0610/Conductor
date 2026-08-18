@@ -1,8 +1,7 @@
 # 1. V1 is CLI-only; no HTTP server until V2
 
 Date: 2026-08-17
-Status: Accepted
-
+Status: Superseded by [ADR-0010](0010-v2-http-transport.md) for the V2 HTTP surface. The V1 CLI mode (single `run` subcommand, no HTTP listener) remains valid; this ADR's lifting applies to V2 daemon mode (the new `serve` subcommand + REST/SSE surface).
 ## Context
 
 Conductor's job is to drive an LLM CLI as a subprocess and surface
