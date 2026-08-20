@@ -460,9 +460,15 @@ v0.2 决策:**registry 是多 host Hub 形态**——单 host 上的 daemon 仍�
 
 借鉴 Paseo `pid-lock.ts` 模式:同一 host 同一时间只允许一个 Daemon 实例,违反则报错退出。
 
-### 10.2 Registry — 进程内(Phase 1)+ Hub(Phase 4+)
+### 10.2 Registry — 进程内(Phase 1)+ Hub as Dispatcher(Phase 2+)
 
-> v0.5 调整:Phase 1 **不做跨 host Hub**——"seamless 跨 host session 迁移"被识别为**过度工程**(详见 §10.4 顶部说明)。
+> **v0.6 重大调整**:用户明确"task 不要跨机器,Hub 只是分发不同 task 到不同 host"。
+>
+> **结论**:
+> - ❌ SessionMigrator(§10.4)—— **彻底不做**
+> - ❌ "无缝"边界(§10.5)—— **彻底不做**
+> - ✅ Hub(Phase 2+)——**只做 task dispatcher**,不做迁移
+> - ✅ Task 永远绑定一个 host,host 死 → task 死,用户重试
 
 **Phase 1**:只有进程内 `PlayerRegistry`,无 Hub。
 
@@ -511,340 +517,8 @@ type PlayerSelector interface {
 并行 agent 在同一 repo 上工作时必须隔离(否则 git 工作树互相覆盖)。直接复用 Paseo `server/worktree/` 的模式:每条并行 branch 自动 `git worktree add` 到 `.conductor/worktrees/<branch>`。
 
 **Phase 1 也需要**:即使没有 Hub,本机并行 agent 仍要 worktree 隔离(parallel stages 共享同一 host)。
-**Phase 4+ 才需要 "同 host 优先路由"**:Phase 1 没有跨 host 调度,worktree 自然在本机。
 
-### 10.4 跨 Host Session 迁移(**Phase 4+ 才做 — v0.5 重新评估**)
-
-> **v0.5 重大调整**:用户问题"是不是伪需求"刺中要害——诚实答案是:**Phase 1 不做**。
->
-> **为什么"seamless migration"在 Phase 1 是过度工程**:
-> - 高频场景(本地 daemon + 跨设备访问)不需要 session 迁移,Paseo 用 relay 就够
-> - 低频场景(host 宕机 / 长跑 SLA)有更简单的替代:`claude --resume <id>` 或 workflow checkpoint restart
-> - 真正的代价是:Hub 路由 + SessionMigrator + 失败回滚 4 阶段 + JSONL 版本兼容 + 7 个 e2e 测试 ——**为 1% 的场景付 40% 的复杂度税**
->
-> **v0.4 的设计仍然保留**(phase 4+ 复用):
-> - `SessionMigrator` interface
-> - `SessionSnapshot` 结构
-> - `ClaudeSessionMigrator` 实现骨架
-> - Hub 路由逻辑
->
-> **Phase 1 用户体验**(等价的):
-> - 本地 daemon + CLI/WebUI 控制
-> - 多 stage 并行 + worktree 隔离(本机内)
-> - workflow checkpoint(供本机恢复,**不**跨 host)
-> - 如需"另一台机器上看到/控制"——走 Paseo 的 E2E relay 模式
-
-#### 10.4.1 单 provider vs 多 provider 的迁移复杂度(Phase 4+ 视角)
-
-| 维度 | 单 provider v1 (只 Claude) | 多 provider v1 |
-|---|---|---|
-| Session 格式 | 1 个 JSONL 格式 | N 个格式 + 翻译 |
-| 迁移 payload 形态 | 一致 | 每个 provider 不一样 |
-| Resume 协议 | `--resume <session-id>` | 各家各做(app-server / ACP / CLI flag) |
-| 工作目录同步 | `git bundle` 一份 | 各 provider 各自 working state |
-| 测试矩阵 | 1×host | N×host |
-| **跨 provider session 翻译** | **不需要** | **open research problem**(SDK 也不解决) |
-
-> **结论**:Phase 1 想跑通"host A 的 Claude session 迁到 host B 接着跑",**只支持 Claude 即可**。想跑通"host A Claude → host B Codex",本质是 LLM 翻译工作,与协议无关,不是 Phase 1 该做的。
-
-#### 10.4.2 抽象先行:interface 第一天就设计,实现 v1 单 provider
-
-Go interface 零成本(无运行时开销),推荐:
-
-```
-Phase 1:
-  - AgentClient / AgentSession interface(必须)
-  - 唯一实现:ClaudeAgentClient
-  - SessionMigrator interface(必须)
-  - 唯一实现:ClaudeSessionMigrator
-
-Phase 2:
-  - 加 CodexAgentClient + CodexSessionMigrator
-  - interface 不变,只是新增实现
-  - 跨 provider 翻译仍不做(走 briefing,§12.11)
-```
-
-#### 10.4.3 Session 迁移的 5 类数据
-
-跨 host 迁移要搬走:
-
-1. **Provider 私有 session 状态**(Claude 的 `~/.claude/projects/<project>/<session-id>.jsonl`)
-2. **Working directory 内容**(worktree git state + uncommitted changes)
-3. **Workflow cursor**(§12.8 — 当前 stage + attempt)
-4. **Refs**(§12.5 — file / worktree / session handles)
-5. **Meta**(startedAt、hosts 列表、cost 等)
-
-#### 10.4.4 SessionMigrator interface
-
-```go
-// internal/migrate/migrator.go
-type SessionMigrator interface {
-    // host A:序列化 provider 私有 session 状态
-    ExportSession(ctx context.Context, sessionID string) (SessionSnapshot, error)
-    // host B:反序列化 + 恢复
-    ImportSession(ctx context.Context, snap SessionSnapshot) (string, error)
-    // Hub 决策用:能不能跨 provider
-    Capabilities() MigrationCapabilities
-}
-
-type SessionSnapshot struct {
-    Provider      string             // "claude" v1
-    FormatVersion string             // "claude-session/v1"
-    Payload       []byte             // gzip(JSONL)
-    WorkingDir    string             // host B 上需要存在
-    FilePayloads  map[string][]byte  // worktree.bundle、attached files
-    Cursor        WorkflowCursor     // §12.8
-    Refs          RefMap             // §12.5
-    Meta          map[string]any
-}
-
-type MigrationCapabilities struct {
-    CrossProvider   bool  // v1:false(只能同 provider)
-    StreamingExport bool  // 大 payload 流式
-    Incremental     bool  // 增量迁移(只搬新增)
-}
-```
-
-#### 10.4.5 Claude v1 实现要点
-
-```go
-// internal/provider/claude/migrate.go
-type ClaudeMigrator struct{ home string }  // ~/.claude
-
-func (m *ClaudeMigrator) ExportSession(ctx, sessionID) (SessionSnapshot, error) {
-    project := projectHashFor(sessionID)
-    jsonlPath := filepath.Join(m.home, "projects", project, sessionID+".jsonl")
-    payload, _ := os.ReadFile(jsonlPath)
-    cwd := extractCwd(payload)   // 从 JSONL 首行解析
-
-    files := map[string][]byte{}
-    if isGitWorktree(cwd) {
-        bundle, _ := exec.CommandContext(ctx, "git", "-C", cwd, "bundle", "create", "-", "HEAD").Output()
-        files["worktree.bundle"] = bundle
-    }
-    // uncommitted changes?
-    diff, _ := exec.CommandContext(ctx, "git", "-C", cwd, "diff", "HEAD").Output()
-    files["uncommitted.patch"] = diff
-
-    return SessionSnapshot{
-        Provider:      "claude",
-        FormatVersion: "claude-session/v1",
-        Payload:       gzip(payload),
-        WorkingDir:    cwd,
-        FilePayloads:  files,
-    }, nil
-}
-
-func (m *ClaudeMigrator) ImportSession(ctx, snap) (string, error) {
-    payload := gunzip(snap.Payload)
-    jsonlPath := filepath.Join(m.home, "projects", projectHashFor(snap.WorkingDir), snap.WorkingDir+".jsonl")
-    _ = os.WriteFile(jsonlPath, payload, 0644)
-
-    if bundle, ok := snap.FilePayloads["worktree.bundle"]; ok {
-        _ = os.MkdirAll(snap.WorkingDir, 0755)
-        _ = exec.CommandContext(ctx, "git", "-C", snap.WorkingDir, "clone", "--bare", "...", ".").Run()
-    }
-
-    // Claude CLI 后续 spawn 时会传 --resume,provider 自己恢复多轮状态
-    return snap.WorkingDir, nil
-}
-```
-
-#### 10.4.6 Hub 端迁移触发
-
-```go
-// internal/hub/migrate.go
-func (h *PlayerHub) MigrateWorkflow(wf WorkflowID, from, to PlayerID) error {
-    // 1. §14 cancel host A 上的 stage
-    h.cancelOnHost(from, wf)
-
-    // 2. 从 from 导出
-    snap, err := h.registry.Of(from).Migrator().ExportSession(ctx, wf.SessionID)
-    if err != nil { return err }
-
-    // 3. snap 传到 to(走 Hub ↔ Player WS,大 payload 用 HTTP multipart 分片)
-    if err := h.transfer(ctx, snap, from, to); err != nil { return err }
-
-    // 4. host B 导入
-    if _, err := h.registry.Of(to).Migrator().ImportSession(ctx, snap); err != nil {
-        return err
-    }
-
-    // 5. host B 续跑 workflow(读 WorkflowState.cursor)
-    return h.registry.Of(to).ResumeWorkflow(wf)
-}
-```
-
-#### 10.4.7 传输层选择
-
-- **小 payload**(< 10MB):走 Hub ↔ Player WS,JSON 序列化
-- **大 payload**(worktree bundle):HTTP multipart 上传到 Hub,Hub 转发到目标 host
-- **可选压缩**:zstd / gzip,snap 大时默认开
-- **签名**:Hub → Player 通信用 mTLS 或短期 token(§16 待定)
-
-#### 10.4.8 失败与回滚
-
-| 阶段 | 失败处理 |
-|---|---|
-| Export 失败 | 重试 3 次;失败则 run 标 `migration_failed`,workflow 不动 |
-| 传输失败 | Hub 重传;失败则 from host 继续跑(已 cancel 的 stage 由 §14 degraded 恢复) |
-| Import 失败 | 回滚 from 不可能(stage 已 cancel);run 标 `migration_failed`,用户决定 |
-| Resume 失败 | workflow 回到 `cursor` 之前的 stage 重跑 |
-
-#### 10.4.9 v1 严格单 provider 的代价
-
-**这是 Conductor 必须诚实承认的**:
-
-- v1 用户**只能用 Claude Code**
-- 想用 Codex / Pi 的 **必须等 v2**
-- 这是**功能完整性**换**架构正确性**——Phase 1 跑通跨 host 迁移比"支持 5 个 provider 但没一个能迁"价值高
-
-**Phase 2 加新 provider 时**:
-- 新 provider 需要实现 `SessionMigrator`(自己的 Export/Import)
-- `MigrationCapabilities.CrossProvider = false`(单 provider 迁移 OK,跨 provider 走 §12.11 briefing)
-- 测试矩阵自动扩展
-
-#### 10.4.10 §15 自我审视更新
-
-> **新发现的设计债务**:
->
-> v1 单 provider 的"够用"是**架构层**够用(interface + migrator + Hub 流程),但**业务层**意味着 Conductor v1 用户只能跑 Claude。如果项目用户场景 80% 是 Claude,这个 trade-off 完全合理;如果 50% 是 Codex 用户,Phase 2 必须立刻补。
-
-
-
-### 10.5 同 Provider Task 的"无缝"边界(**Phase 4+ 才做 — v0.5 重新评估**)
-
-> **v0.5 调整**:与 §10.4 一同推迟到 Phase 4+。本节设计内容保留作为未来参考。
->
-> 原 v0.4 立场:"task 使用同一种 provider 是不是就可以无缝迁移?" → 是,但代价过高。
->
-> v0.5 立场:Phase 1 **不做 session migration**,改用 checkpoint + resume(`claude --resume`);Phase 4+ 再考虑 §10.4 / §10.5。
-
-#### 10.5.1 Happy Path 流程(同 provider task 跨 host)
-
-```
-host A 失联 → Hub 心跳超时 → cancel host A 上 stage(§14)
-→ ClaudeSessionMigrator.ExportSession(读 JSONL + git bundle)
-→ Hub 传 snap 到 host B
-→ ClaudeSessionMigrator.ImportSession(写回 JSONL + 解 bundle)
-→ spawn `claude --resume <session-id>` 接着跑
-→ WorkflowState.cursor 让 workflow engine 从对的 stage 续
-```
-
-只要 task 全程用同 provider,这条链路就是设计 happy path。
-
-#### 10.5.2 "无缝"的三档定义
-
-| 状态类别 | 能否迁移 | 说明 |
-|---|---|---|
-| **对话层**(conversational) | ✅ **完全无缝** | 用户零感知 |
-| **配置层**(config) | ✅ **完全无缝** | 文件级搬运 |
-| **运行层瞬态**(runtime ephemeral) | ⚠️ **几十秒级重连** | 用户短暂感知 |
-| **运行层有状态**(stateful) | ❌ **无法迁移** | 需在 workflow spec 里避坑 |
-
-#### 10.5.3 完全无缝(用户零感知)
-
-- **多轮对话历史**:Claude JSONL 文件 `~/.claude/projects/<project>/<session-id>.jsonl` 完整搬运,`--resume` 重建上下文
-- **Tool call 历史**:Claude 自己 replay tool call 历史,无需 Conductor 干预
-- **Tool 结果**:同上,JSONL 含完整 tool_use / tool_result
-- **工作目录**:worktree git bundle + uncommitted patch,目标 host 重建完整 git state
-- **Workflow 进度**:`WorkflowState.cursor` 完整搬运(§12.8),engine 从对的 stage 续
-- **Skill 列表**:SKILL.md 文件随 worktree 一起搬
-- **MCP 配置**:`.mcp.json` 配置文件搬运
-- **Agent spec / 启动参数**:`AgentSpec` 在 `WorkflowState` 里持久化
-
-#### 10.5.4 短暂重新初始化(几十秒级)
-
-- **MCP server 子进程**:Playwright、数据库连接等在 host A 上是 Claude 的 child process;迁移后需重启
-  - 影响:用户看到几秒到几十秒的"等待"(类似 CLI 启动时间)
-  - 缓解:Phase 2 可做 MCP 连接池 / 健康检查
-- **活动的 file watcher**:`fswatch` / `chokidar` 等:进程死了,新 host 重启
-- **dev server / hot reload**:Vite dev server 等:同 file watcher
-- **Pending permission request**:用户在 host A 上点了"允许",host A 死了;新 host 上需重新批准
-  - 缓解:Phase 2 可做"permission cache"持久化已批准列表
-
-#### 10.5.6 无法迁移(workflow 设计需避坑)
-
-- **中间 stateful 操作的部分完成状态**:例:
-  - 跑到一半的数据库 migration(部分表已迁移)
-  - 大文件 atomic rename 进行到一半
-  - 分布式锁已获取未释放
-- **长连接**:SSH session / 长寿命 WebSocket / streaming HTTP response
-- **Background process**:在 host A 上 `nohup ... &` 启动的后台进程
-
-> **关键边界**:这是**现实约束**,与 Conductor 实现无关。Conductor 的应对是:
-> - 在 §8 workflow spec 提示用户标记"长操作 stage"(用 `idempotent: false` 标记)
-> - 给 stage 加 retry 安全检查(§14.7)
-> - 文档警告:不要在 stage 中发起"不可中断的长连接"
-
-#### 10.5.7 Hub 减少迁移触发频率
-
-§10.3 的策略减少实际触发概率:
-
-- **健康 host**:零迁移,纯同 host 调度
-- **短暂失联**:30s 心跳超时后才触发(可配)
-- **多 stage 串行**:Hub 选能跑**整个 workflow** 的 host,避免中途迁移(基于 workflow spec 的 provider 列表 + host 能力 tag)
-- **失败慢回退**:Hub 收到 host 警告但还没失联时,可主动 drain 现有 stage(§14.6)再迁移
-
-#### 10.5.8 多 Provider Task 的复杂度(Phase 2+)
-
-如果将来有"Plan=Claude, Do=Codex, Check=Claude"这种**单 run 跨 provider**:
-
-```go
-type WorkflowState struct {
-    // ...
-    Stages map[string]StageOutput
-    StageProvider map[string]string  // stage → provider(新增字段)
-    // 每个 stage 单独有 session,需各自迁移
-}
-```
-
-迁移时:
-1. Hub 看 `StageProvider` map,知道这个 workflow 用了哪些 provider
-2. 选目标 host 时加约束:`Selector.RequireProviders = ["claude", "codex"]`
-3. 每个 stage 单独调对应 `SessionMigrator`
-4. 跨 provider stage 边界迁移时,**没有跨 provider 翻译**——只是把 A provider 的 stage 在目标 host 重启,从 stage output 重读上下文(走 §12.11 briefing 形式)
-
-**Phase 1 影响**:无。Phase 1 单 provider,这个问题不存在。
-
-#### 10.5.9 e2e 测试矩阵(Phase 1 必须)
-
-| 测试 ID | 场景 | 期望 |
-|---|---|---|
-| `T_session_resume_same_host` | 同 host 中断 + `--resume` | 对话上下文完整保留 |
-| `T_migrate_cross_host` | host A → host B 迁移 | 用户看到任务接着跑,对话无损失 |
-| `T_mcp_reconnect` | MCP server 中断 | 自动重连,无用户感知 |
-| `T_permission_recache` | pending permission 迁移 | 用户在新 host 重新批准 |
-| `T_stateful_op_warning` | stateful 操作中断 | workflow 文档警告 + stage 标 `stateful: true` |
-| `T_drain_before_migrate` | Hub drain 模式 | stage 在 timeoutMs 内优雅收尾,然后迁移 |
-| `T_workflow_resume_after_migrate` | 迁移后 workflow 续跑 | cursor 正确,stage 顺序不乱 |
-
-#### 10.5.10 用户 FAQ
-
-**Q:迁移会不会丢对话?**
-
-A:不会。Claude JSONL 是真实持久化的(每次 turn 写入),ExportSession 读它就拿到了。
-
-**Q:迁移会不会丢未提交代码?**
-
-A:不会。`git diff HEAD` 在迁移前自动打包,目标 host `git apply`。
-
-**Q:迁移要多久?**
-
-A:取决于 payload:
-- 小对话(< 1MB):< 5s
-- 大 worktree(100MB uncommitted):30-60s
-- 超大 worktree(GB 级):分钟级 + 压缩 + 分片
-
-**Q:用户需要做什么?**
-
-A:**零**。Hub 自动检测 → 迁移 → 续跑;UI 上能看到"migrated from host-a"的事件。
-
-**Q:如果用户在迁移过程中发命令?**
-
-A:`conductor send` / `cancel` 都通过 Hub 路由,Hub 把命令转到当前 host;迁移期间命令排队,迁移完成后投递。
-
----
+> ~~v0.4 §10.4 跨 Host Session 迁移 / v0.4 §10.5 "无缝"边界 —— v0.6 彻底删除,不进入设计。~~
 
 ## 11. 持久化与可观测
 
@@ -907,6 +581,99 @@ CONDUCTOR_STORAGE=sqlite # 切 SQLite(同一文件:$CONDUCTOR_HOME/conductor.db)
 ## 12. Workflow Context — 跨步骤传递(详细设计)
 
 v0.2 重点新增。Context 是 PDCA 工作流的脊柱,设计错会让长跑 workflow 不可恢复、跨 host 不可迁移。
+
+> **v0.6 作用域澄清**:
+> - `WorkflowContext` = **per-task, per-host**——一个 task 的所有 stage 共享同一 context,但**不同 task 之间的 context 完全独立**
+> - Ref 永远指向**本机资源**(文件、worktree、session、blob)
+> - 没有跨 task / 跨 host 的 context bus
+> - Host 死了 → context 随 task 一起死;用户重试 → 新 task,新 context
+
+详见 §12.0 边界说明。
+
+### 12.0 边界(Per-Task, Per-Host)
+
+> v0.6 新增。在 v0.5 的 "本地优先" 基础上,进一步明确 contextBus 的物理边界。
+
+#### 12.0.1 物理边界
+
+```
+              Host A                           Host B
+         ┌─────────────────┐             ┌─────────────────┐
+         │ WorkflowState   │             │ WorkflowState   │
+         │  HostID: A      │             │  HostID: B      │
+         │  Stages: {...}  │             │  Stages: {...}  │
+         │  Refs: {...}    │             │  Refs: {...}    │
+         │  BlobStore: ... │             │  BlobStore: ... │
+         └─────────────────┘             └─────────────────┘
+                ↑                                ↑
+                │ 完全独立                        │
+                │ (不同 task)                    │
+                └────────────────────────────────┘
+                         (无共享)
+```
+
+**强不变量**:
+- `WorkflowState.HostID` 一旦设定,**整个 task 生命周期不变**
+- 同 task 的所有 stage 共享同一 context(同 host)
+- 跨 task 的 context **不共享**(Phase 1 默认)
+- 跨 host 的 context **不共享**
+
+#### 12.0.2 Ref 系统本机化
+
+| Ref kind | 物理位置 | 跨 host? |
+|---|---|---|
+| `file` | 本机绝对路径 | ❌ |
+| `worktree` | 本机 git worktree | ❌ |
+| `session` | 本机 provider session handle | ❌ |
+| `blob` | 本机 `$CONDUCTOR_HOME/runs/<runId>/blobs/<sha>` | ❌ |
+
+**没有跨 host Ref**。如果 task A 想给 task B 数据,**Phase 1 不支持**;Phase 2+ 可走 Hub blob store(§10.2 已留接口但 Phase 1 不实现)。
+
+#### 12.0.3 跨 Task 数据共享(Phase 2+ 可选)
+
+如果将来需要"task B 依赖 task A 的输出":
+
+| 方案 | 机制 | Phase |
+|---|---|---|
+| **A. Hub blob store** | Hub 维护 S3-compatible blob;task A 写,Hub 把 URL 给 task B | Phase 3+ |
+| **B. Task chaining** | Hub 调度 task B 时把 task A 的 stage output 序列化成 inputs | Phase 2+ |
+| **C. 不支持(用户手动)** | task 完全独立,数据用户 `cp` / `git push` | **Phase 1** |
+
+**Phase 1 选 C**——task 完全独立,context 完全隔离。
+
+#### 12.0.4 Checkpoint / Resume 语义
+
+```go
+// Phase 1 的 resume(同 host 内)
+func ResumeWorkflow(ctx context.Context, runID string) error {
+    state, err := storage.Load(runID)  // 从本机磁盘读
+    if err != nil { return err }
+
+    // 不变量校验
+    if state.HostID != currentHostID() {
+        return ErrWrongHost  // 本 task 绑了 host,新 host 上不能 resume
+    }
+
+    return runFrom(state.Cursor)
+}
+```
+
+**跨 host 续跑的合法方式**:
+- 方式 1:新 host 上**重新启动 task**(`conductor run ...`),从头跑
+- 方式 2(高级):用户 `git push` worktree + `claude --resume <session-id>`,**用户层面**,不是 Conductor 责任
+
+#### 12.0.5 Provider Session 也 Per-Host
+
+```go
+type SessionRef struct {
+    Provider  string     // "claude"
+    HostID    string     // session 在哪
+    SessionID string     // provider session id
+    Handle    AgentPersistenceHandle
+}
+```
+
+**Session 不能跨 host resume**。技术上 Claude `--resume <id>` 可以,但要求新 host 的 `~/.claude/projects/...` 有对应 JSONL。Conductor **不做**自动跨 host session 搬运。
 
 ### 12.1 三类数据流动
 
@@ -1320,7 +1087,9 @@ Phase 2:
   - workflow/ 软工作流引擎(自研,§8.6 方案 A)+ PDCA/GSD 默认预设
   - registry/ 进程内注册表
   - worktree/ 自动隔离
-  - cancellation/ §14 协议落地 + 跨 host e2e
+  - cancellation/ §14 协议落地 + 单 host e2e
+  - **Hub as dispatcher(§10.2 新语义)** —— 多 host 分发不同 task
+  - **Provider 扩展** —— 加 Codex/Pi(每个 provider 独立 SessionRef,per-host)
 
 Phase 3:
   - provider/ 扩到 3+ provider(Codex、Paseo ACP 类);迁移能力按 provider 扩展
@@ -1328,11 +1097,12 @@ Phase 3:
   - 更多编排原语(join 策略、loop 条件)
 
 Phase 4:
-  - **Hub** + SessionMigrator 跨 host(§10.2 + §10.4 复活)
-  - 多 Daemon 注册与路由 + HA
+  - Hub HA(主备/共识)
   - 可选 Web UI
   - 可选 Postgres 后端
   - Tiered memory(Layer 4)
+  - ~~SessionMigrator 跨 host 迁移~~ **不做**(用户决策 v0.6)
+  - ~~"无缝"边界~~ **不做**
 ```
 
 ## 14. Cancellation Protocol
@@ -1559,9 +1329,9 @@ DELETE /v1/runs/<runId>?force=true            # 立即
 
 7. **Quota / Auth 抽象** —— Paseo 有 `services/quota-fetcher`,我们 Phase 1 不做。意味着用户得自己在 provider 配置里管 API key。
 
-8. ~~**Hub 的可靠性是单点**~~ —— **v0.5 撤销**(Phase 1 无 Hub);Phase 4+ 复活时考虑 Hub HA(主备/共识)。
+8. ~~**Hub 的可靠性是单点**~~ —— **v0.6 彻底撤销**(Hub 现在是 Phase 2+ dispatcher,且不做迁移;可靠性要求大幅降低)。
 
-9. **测试与并发模型** —— §14 已给出 cancellation 协议,但死锁、idempotency 在分布式下的语义还需在 Phase 2 e2e 中验证。Phase 1 无跨 host,验证范围缩小但 §8 parallel stage 仍要死锁检测 + `go test -race`。
+9. **测试与并发模型** —— §14 已给出 cancellation 协议。Phase 1 无跨 host,验证范围缩小;但 §8 parallel stage 仍要死锁检测 + `go test -race`。Phase 2+ Hub dispatcher 的"host 调度一致性"需要 e2e 测试。
 
 10. **Provider 版本兼容** —— Claude Code SDK、Codex app-server 都在快速迭代。Provider 实现必须把"哪些字段是稳定的、哪些会变"显式标注,**当前未约定 deprecation 策略**。
 
@@ -1571,15 +1341,17 @@ DELETE /v1/runs/<runId>?force=true            # 立即
 
 11. **过度工程风险(自我警告)** —— "Player registry" / "Multi-host Hub" / "Seamless migration" 这些概念**容易被术语诱惑**(Multica 是团队协作平台所以需要这些,但 Conductor 是 dev 工具,用户场景不同)。v0.5 已自我修正砍掉 Hub/Migration,但 Phase 2+ 设计时仍要警惕:**新术语新抽象不要堆砌,先问"99% 用户场景真的需要吗?"**
 
-## 16. 已确认的关键决策(v0.4)
+## 16. 已确认的关键决策(v0.6)
 
 | 决策点 | 选定方案 | 章节 |
 |---|---|---|
 | Server 语言栈 | **Go**(单 binary,Daemon/Hub/CLI 同进程;context.Context 原生支持 §14) | §0, §17 |
 | WebUI 语言栈 | **JS** (Next.js 14 App Router + React 18),Phase 1 后启动 | §3 |
-| Phase 1 形态 | **本地优先**(local-first),单 host daemon,Paseo 模型;无 Hub | §10, §10.5(v0.5)|
-| Phase 1 provider | **单 provider**:Claude Code only(v1 不支持 Codex/Pi/ACP) | §10.4(推迟) |
-| Phase 4+ 跨 host 迁移 | SessionMigrator + Hub 路由,**设计保留,实现推迟** | §10.4, §10.5 |
+| Phase 1 形态 | **本地优先**(local-first),单 host daemon,Paseo 模型;无 Hub | §10 |
+| Phase 1 provider | **单 provider**:Claude Code only(v1 不支持 Codex/Pi/ACP) | §5 |
+| 多 host task 模型 | **task 不跨机器**;Hub(Phase 2+)= dispatcher,分发不同 task 给不同 host | §10.2 |
+| 跨 host session 迁移 | **彻底不做**(用户决策 v0.6) | §10.4 ~~删除~~ |
+| "无缝"边界 | **彻底不做**(用户决策 v0.6) | §10.5 ~~删除~~ |
 | Phase 2+ provider | 加新 provider 时新增实现,interface 不变;跨 provider 翻译暂不做 | §12.11 |
 | Workflow 引擎 | **A. 自研轻量软工作流引擎**(否掉 Temporal/Restate 重方案,否掉 prompt-only 退化) | §8.6 |
 | Player registry | **多 host Hub**(进程内 + 跨 host 注册中心) | §10.2 |
@@ -1962,6 +1734,41 @@ type ACPParser struct{ /* 与 Codex 同,但方法名是 ACP 规范的 */ }
 ---
 
 ## 版本变更
+
+### v0.5 → v0.6(本次更新 — 彻底删除 session migration,Hub 改为 dispatcher)
+
+**用户决策**(核心):
+- ❌ SessionMigrator(原 §10.4)**彻底不做**——不进入设计
+- ❌ "无缝"边界(原 §10.5)**彻底不做**——不进入设计
+- ✅ 多 host task 模型:**task 不跨机器**;Hub(Phase 2+)= **dispatcher** 分发不同 task 给不同 host
+- ✅ Host 死 mid-task → task 死,用户重试(K8s Pod 模型)
+
+**§10 重大清理**:
+- §10.2 重写:Hub 新语义为 `DispatchTask(ctx, req) → HostID`,不是 `MigrateWorkflow`
+- §10.4(原 SessionMigrator)**整段删除**
+- §10.5(原 无缝边界)**整段删除**
+- §10.3(原 worktree)保留作为最后小节
+
+**新增 §12.0 contextBus 边界(Per-Task, Per-Host)**(5 小节):
+- §12.0.1 物理边界(Host A / Host B 各自独立的 WorkflowState)
+- §12.0.2 Ref 系统本机化(file/worktree/session/blob 全在本机)
+- §12.0.3 跨 Task 数据共享 3 方案(Hub blob / Task chaining / 不支持)
+- §12.0.4 Checkpoint / Resume 语义(同 host 内,跨 host 拒绝)
+- §12.0.5 Provider Session 也 Per-Host(SessionRef 含 HostID)
+
+**§13 路线图调整**:
+- Phase 1:删 "Hub 跨 host 路由 + session 迁移" 行,加 "contextBus per-task per-host (§12.0)"
+- Phase 2:加 "Hub as dispatcher(§10.2 新语义) + Provider 扩展"
+- Phase 4:删除 "Hub + SessionMigrator 复活" 行
+
+**§16 决策表调整**:
+- 删除 "Phase 4+ 跨 host 迁移" 行
+- 新增 "多 host task 模型:task 不跨机器,Hub = dispatcher" 行
+- §10.4 / §10.5 标记"~~删除~~"
+
+**§15 弱点调整**:
+- #8 "Hub 可靠性" 改为 ~~v0.6 彻底撤销~~
+- #9 "测试与并发" 收窄为 Phase 1 范围 + 提示 Phase 2+ Hub 调度一致性
 
 ### v0.4 → v0.5(本次更新 — Phase 1 范围重新评估)
 
