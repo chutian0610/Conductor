@@ -816,60 +816,84 @@ $CONDUCTOR_HOME/
 
 
 
-#### 6.2.10 为什么 Per-Invocation(而不是 Per-Run 或 Per-Spec)
+#### 6.2.10 为什么 Per-Spec(而不是 Per-Run 或 Per-Invocation)
 
-> v0.8 补充。用户问题:"为啥是 per run,而不是 per-spec?"
+> **v0.12 立场反转**(用户洞察)。早期版本 §6.2.10 反对 per-spec,后来改为支持 per-spec。本节重写反映 v0.12 定论。
 
-**Per-spec 在我们的模型下有根本问题**:
+**为什么 per-spec 是正确的复用边界**:
 
-```
-设想 AgentSpec A = "Claude planner":
-  Run 1(周一) 用 spec A → spec A 的 HOME
-  Run 2(周二) 用 spec A → 同一个 spec A 的 HOME
-  Run 3(周三) 用 spec A 并行 → 还是同一个 HOME
-```
+- Spec = 用户定义的 agent 模板(provider + model + skills + mcp + worktree ...)
+- Spec 是**长寿命实体**,run 是**短寿命事件**
+- Spec 自然复用 → 同 spec 多次 invoke → **共享 HOME 才是正确语义**
+- Spec 改 provider → 新 specId → 新 HOME(用户明确升级动作)
 
-**两个 run 同时跑同一 spec → 共享 HOME 写共享文件 → race**:
+**Per-Run 的问题(早期选择的局限)**:
 
-| 文件 | 能否 race? |
+| 问题 | 后果 |
 |---|---|
-| `~/.claude.json` | ❌ 两个 Claude 同时改 → 损坏 |
-| `~/.claude/settings.json` | ❌ 同上 |
-| `~/.claude/mcp.json` | ❌ 同上 |
-| session JSONL | ✅ session ID 唯一,文件名不冲突 |
+| 同一 run 不同 stage 不同 provider | ❌ 一个 HOME 不能放两个 config.toml |
+| 同 spec 多次 run 不复用 HOME | ❌ 每次重新建 HOME,config.toml 重复,浪费 |
+| Session 不能跨 run 续 | ❌ JSONL 在 `runs/<runId>/...`,run 结束清理就没了 |
 
-**清理粒度也反了**:
-- Spec 长寿命(用户定义,反复用)
-- Run 短寿命(一次执行)
-- Per-spec HOME → 删 Run 1 session 要遍历 spec HOME,可能误删别的 run
-- Per-run HOME → `rm -rf runs/<runId>` 一刀切,零歧义
+**Per-Invocation 的问题(我上一轮走过头)**:
 
-**那 per-spec HOME 想解决什么?**
+| 问题 | 后果 |
+|---|---|
+| 每次 spawn 重写 config.toml | ❌ 浪费,失去 spec 作为复用单元的意义 |
+| Session 不能跨 invoke 续 | ❌ JSONL 在 `invocations/<id>/...`,每次重起 |
+| 磁盘 N 个 HOME per spec | ❌ 浪费 |
 
-| 候选动机 | per-spec 真能解? | 正确做法 |
+**Per-Spec 解决了所有这些**:
+
+| 场景 | Per-Spec 行为 |
+|---|---|
+| Run A stage 1 用 spec P1(OpenRouter/Claude)| `specs/P1/home/` → config.toml 写 openrouter |
+| Run A stage 2 用 spec P2(OpenAI/GPT-5)| `specs/P2/home/` → 不同 HOME,config.toml 写 openai |
+| 同 spec 多次 invoke | 共享 `specs/P1/home/`,session JSONL 可 resume |
+| 并发不同 run 用同 spec | 共享 `specs/P1/home/`,session ID 唯一不冲突 |
+| Spec 改 provider | 用户新建 spec,新 specId,新 HOME |
+
+**Per-Spec HOME 并发风险**(诚实):
+
+| 共享资源 | race 风险 | 缓解 |
 |---|---|---|
-| "同 spec 重复 run 想续上次 session" | ❌ race + 命名混乱 | `--resume <session-id>` flag |
-| "spec 默认 config 跨 run 复用" | ⚠️ config 共享 ≠ HOME 共享 | `$CONDUCTOR_HOME/specs/<specId>/config.json`(纯配置)|
-| "想节省 HOME dir 数量" | 是,但代价高 | 不优化 |
+| `config.toml` | ❌ 只读(创建后不变)| 无 race |
+| Session JSONL | ✅ session ID 唯一 | 文件名不冲突 |
+| `auth.json` symlink | ❌ symlink 不变 | 无 race |
+| Codex 内部 state | ⚠️ 可能短暂 race | 加 file lock(Phase 1 可不实现,接受 race)|
 
-**Per-run 在 3 个并发场景下都正确**:
+**`specId` 来源**(v0.12 决定):
 
-| 场景 | per-run 行为 |
-|---|---|
-| 并行 2 个不同的 spec | Run 1 (spec A) → HOME_A,Run 2 (spec B) → HOME_B,完全隔离 |
-| 并行 2 个相同的 spec | Run 1 (spec A) → HOME_1,Run 2 (spec A) → HOME_2,session/setting 不共享 |
-| 同一 run 内多个 stages | 全程一个 HOME,session ID 各异,settings/MCP 共享(合理,同 task)|
+- **用户命名**为主:`conductor spec create --name my-claude-planner`
+- **内容 hash** 校验:spec 字段 hash,确保相同字段同名 = 同一 spec
+- **冲突解决**:用户命名 + hash 后缀(`my-claude-planner-abc123`)
 
-**如果用户真要"session 跨 run 续"**——那是 **workspace** 语义(Paseo 已有),不是 spec:
+**Spec 持久化结构**:
 
 ```
-Phase 2+ workspace 模型(若需要):
-$CONDUCTOR_HOME/workspaces/<workspaceId>/home/    ← 持久 HOME
-$CONDUCTOR_HOME/workspaces/<workspaceId>/runs/<runId>/
-  state.json / timeline / blobs
+$CONDUCTOR_HOME/specs/<specId>/
+├── spec.json              ← spec 定义(provider, model, skills, mcp, worktree)
+└── home/                   ← per-spec HOME
+    ├── .codex/config.toml  ← spec 创建时一次写
+    ├── .codex/sessions/<s>.jsonl
+    └── .codex.json → $CONDUCTOR_HOME/.auth/<provider>/auth.json
 ```
 
-Phase 1 不需要 workspace。per-run 够用。
+**CLI 命令**(Phase 1):
+
+```bash
+conductor spec create --name my-claude-planner \
+  --provider openrouter \
+  --model anthropic/claude-opus-4-6 \
+  --skills [...] --mcp [...]
+
+conductor spec list                  # 列出所有 spec
+conductor spec show <specId>         # 查看 spec 详情
+conductor spec rm <specId>           # 删除 spec + HOME
+
+conductor run --spec <specId> "..." # invoke spec
+conductor run --spec <specId> --resume <sessionId> "..."  # 续 session
+```
 
 ---
 
