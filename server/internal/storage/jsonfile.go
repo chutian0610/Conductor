@@ -17,29 +17,45 @@ import (
 )
 
 // JsonFileStorage is the Phase 1 Storage implementation: one
-// directory per run under $CONDUCTOR_HOME/runs/<runId>/. See
-// doc.go for the on-disk layout.
+// directory per run under <root>/runs/<runId>/. See doc.go for
+// the on-disk layout.
 type JsonFileStorage struct {
+	root      string  // CONDUCTOR_HOME or test-supplied
 	muByRunID sync.Map // runID -> *sync.Mutex (process-scoped; cross-process locking is Phase 2)
 }
 
-// NewJsonFileStorage returns a Storage backed by JSON files.
-// Ensures $CONDUCTOR_HOME/runs/ exists with 0700 perms.
+// NewJsonFileStorage returns a Storage backed by JSON files
+// under $CONDUCTOR_HOME/runs/. Ensures the runs/ directory exists
+// with 0700 perms.
 func NewJsonFileStorage() (*JsonFileStorage, error) {
-	if err := os.MkdirAll(runsDir(), 0o700); err != nil {
-		return nil, fmt.Errorf("mkdir runs: %w", err)
-	}
-	return &JsonFileStorage{}, nil
+	return NewJsonFileStorageAt(home.ConductorHome())
 }
 
-// runsDir returns $CONDUCTOR_HOME/runs/. Lives here (not in
-// home/) because storage is the only writer.
-func runsDir() string {
-	return filepath.Join(home.ConductorHome(), "runs")
+// NewJsonFileStorageForHome is the test-facing alias. Same as
+// NewJsonFileStorageAt; the name is more descriptive in tests
+// ("for this home dir") than the implementation detail ("at this
+// path").
+func NewJsonFileStorageForHome(root string) (*JsonFileStorage, error) {
+	return NewJsonFileStorageAt(root)
+}
+
+// NewJsonFileStorageAt is the explicit-root constructor. Tests
+// use it to point at a temp directory without touching
+// $CONDUCTOR_HOME.
+func NewJsonFileStorageAt(root string) (*JsonFileStorage, error) {
+	if err := os.MkdirAll(filepath.Join(root, "runs"), 0o700); err != nil {
+		return nil, fmt.Errorf("mkdir runs: %w", err)
+	}
+	return &JsonFileStorage{root: root}, nil
+}
+
+// runsDir returns <s.root>/runs/.
+func (s *JsonFileStorage) runsDir() string {
+	return filepath.Join(s.root, "runs")
 }
 
 func (s *JsonFileStorage) runDir(runID string) string {
-	return filepath.Join(runsDir(), runID)
+	return filepath.Join(s.runsDir(), runID)
 }
 
 func (s *JsonFileStorage) statePath(runID string) string {
@@ -133,7 +149,7 @@ func (s *JsonFileStorage) ListRuns(ctx context.Context, filter RunFilter) ([]Run
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	entries, err := os.ReadDir(runsDir())
+	entries, err := os.ReadDir(s.runsDir())
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil

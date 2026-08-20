@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"os"
 	"fmt"
 	"time"
 
@@ -45,7 +46,7 @@ type EventHandler func(ev protocol.AgentStreamEvent)
 //   - codex.NewSession failure (HOME missing, binary missing, ...)
 //   - turn/start or turn/completed failure
 //   - ctx cancellation
-func Invoke(ctx context.Context, specID, prompt string, runID string, store storage.Storage, onEvent EventHandler) (*protocol.AgentTurnResult, error) {
+func Invoke(ctx context.Context, specID, prompt string, runID string, store storage.Storage, onEvent EventHandler, sigCh <-chan os.Signal) (*protocol.AgentTurnResult, error) {
 	if specID == "" {
 		return nil, fmt.Errorf("runner: specID required")
 	}
@@ -69,6 +70,17 @@ func Invoke(ctx context.Context, specID, prompt string, runID string, store stor
 	}
 	_ = state // currently unused; reserved for future spec metadata snapshots
 
+	// Record the host process id so `conductor cancel <runId>` can
+	// find us. Best-effort: uses context.Background() so the PID
+	// record survives even if the CLI's signal.NotifyContext has
+	// canceled the invCtx.
+	if err := store.UpdateRun(context.Background(), runID, func(rs *storage.RunState) {
+		rs.PID = os.Getpid()
+	}); err != nil {
+		// Non-fatal — cancel will refuse gracefully if PID == 0.
+		fmt.Fprintf(os.Stderr, "warn: record pid: %s\n", err)
+	}
+
 	sess, err := codex.NewSession(ctx, codex.SessionConfig{
 		// Per-spec HOME (so codex reads its config.toml + .codex.json
 		// from the right place — §6.2.5).
@@ -84,6 +96,16 @@ func Invoke(ctx context.Context, specID, prompt string, runID string, store stor
 	if err != nil {
 		_ = markFailed(ctx, store, runID, err)
 		return nil, fmt.Errorf("open codex session: %w", err)
+	}
+
+	// If the caller passed a signal channel, install a watcher that
+	// marks the run cancelled + asks codex to stop on first signal.
+	// The watcher mutates state.json so markFailed's idempotency
+	// check sees the transition and doesn't overwrite back to failed.
+	if sigCh != nil {
+		invokeDone := make(chan struct{})
+		defer close(invokeDone)
+		go watchCancelSignal(ctx, sigCh, invokeDone, store, runID, sess)
 	}
 
 	// Tee each event to both the caller's handler AND the storage
@@ -140,7 +162,7 @@ func Invoke(ctx context.Context, specID, prompt string, runID string, store stor
 //
 // Phase 1 keeps this separate so the runner's "start fresh" path
 // stays obvious.
-func InvokeWithSessionId(ctx context.Context, specID, sessionID, prompt, runID string, store storage.Storage, onEvent EventHandler) (*protocol.AgentTurnResult, error) {
+func InvokeWithSessionId(ctx context.Context, specID, sessionID, prompt, runID string, store storage.Storage, onEvent EventHandler, sigCh <-chan os.Signal) (*protocol.AgentTurnResult, error) {
 	if specID == "" {
 		return nil, fmt.Errorf("runner: specID required")
 	}
@@ -174,6 +196,17 @@ func InvokeWithSessionId(ctx context.Context, specID, sessionID, prompt, runID s
 		MCPConfig:    record.Spec.MCPConfig,
 		SessionId:    sessionID, // routes to thread/resume
 	})
+	if err != nil {
+		_ = markFailed(ctx, store, runID, err)
+		return nil, fmt.Errorf("open codex session: %w", err)
+	}
+
+	if sigCh != nil {
+		invokeDone := make(chan struct{})
+		defer close(invokeDone)
+		go watchCancelSignal(ctx, sigCh, invokeDone, store, runID, sess)
+	}
+
 	if err != nil {
 		_ = markFailed(ctx, store, runID, err)
 		return nil, fmt.Errorf("open codex session: %w", err)
@@ -221,9 +254,20 @@ func InvokeWithSessionId(ctx context.Context, specID, sessionID, prompt, runID s
 
 // markFailed transitions a run to status=failed with the given
 // error message. Best-effort — caller doesn't act on the result.
-func markFailed(ctx context.Context, store storage.Storage, runID string, err error) error {
+// Idempotent wrt cancellation: if the user already triggered a
+// cancel (status=cancelled), we don't overwrite that with failed.
+//
+// Uses context.Background() so the storage update can complete
+// even when the Invoke ctx is canceled (the CLI's
+// signal.NotifyContext cancels invCtx on SIGTERM; the markFailed
+// that follows Send's ctx.Err return must still be able to write
+// state.json).
+func markFailed(_ context.Context, store storage.Storage, runID string, err error) error {
 	msg := err.Error()
-	return store.UpdateRun(ctx, runID, func(rs *storage.RunState) {
+	return store.UpdateRun(context.Background(), runID, func(rs *storage.RunState) {
+		if rs.Status == storage.RunStatusCancelled {
+			return // user already cancelled; don't overwrite
+		}
 		finish := timeNow()
 		rs.Status = storage.RunStatusFailed
 		rs.FinishedAt = &finish
@@ -234,3 +278,44 @@ func markFailed(ctx context.Context, store storage.Storage, runID string, err er
 // timeNow returns the current UTC time. Stubbed as a var so
 // tests can pin timestamps.
 var timeNow = func() time.Time { return time.Now().UTC() }
+
+
+// watchCancelSignal is the cancel hook installed when Invoke is
+// called with a non-nil sigCh. On the first signal it:
+//   1. Marks the run as cancelled in storage (so markFailed in the
+//      main flow doesn't overwrite back to failed).
+//   2. Calls sess.Cancel to ask codex to stop (sends turn/interrupt
+//      or, if that doesn't get a response in 2s, falls through to
+//      Close which sends SIGTERM to the codex subprocess).
+//
+// We close cancelDone when the signal is processed so the deferred
+// <-cancelDone in Invoke returns (it just waits for the watcher to
+// finish its work, not for Send to return).
+func watchCancelSignal(invCtx context.Context, sigCh <-chan os.Signal, invokeDone <-chan struct{}, store storage.Storage, runID string, sess *codex.Session) {
+	// invCtx is the Invoke ctx, which main.go's signal.NotifyContext
+	// may have already canceled by the time the signal fires. Use a
+	// fresh ctx for the storage update + sess.Cancel so the cancel
+	// path itself can't fail because of the cancellation.
+	ctx := context.Background()
+	select {
+	case sig, ok := <-sigCh:
+		if !ok {
+			return
+		}
+	_ = store.UpdateRun(ctx, runID, func(rs *storage.RunState) {
+			if rs.Status == storage.RunStatusRunning {
+				rs.Status = storage.RunStatusCancelled
+				now := timeNow()
+				rs.FinishedAt = &now
+				rs.Error = "cancelled by signal: " + sig.String()
+			}
+		})
+		cancelCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = sess.Cancel(cancelCtx)
+	case <-invokeDone:
+		return // normal completion; nothing to do
+	case <-ctx.Done():
+		return
+	}
+}

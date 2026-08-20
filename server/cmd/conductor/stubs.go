@@ -27,7 +27,3 @@ func runDaemon(_ context.Context, _ []string) error {
 	return ErrNotImplemented
 }
 
-func runCancel(_ context.Context, _ []string) error {
-	cli.Errorf("conductor cancel: %s", ErrNotImplemented)
-	return ErrNotImplemented
-}

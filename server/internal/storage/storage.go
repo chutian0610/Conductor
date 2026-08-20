@@ -35,6 +35,12 @@ type RunState struct {
 	SessionID  string                    `json:"sessionId,omitempty"` // codex threadId (for --resume)
 	Result     *protocol.AgentTurnResult `json:"result,omitempty"`
 	Error      string                    `json:"error,omitempty"` // populated on Status=failed
+
+	// PID is the host process id of the conductor run that owns
+	// this run. Used by `conductor cancel <runId>` to send SIGTERM.
+	// 0 for runs created before this field existed, or for runs
+	// driven by a daemon (Phase 2+).
+	PID int `json:"pid,omitempty"`
 }
 
 // TimelineItem is one NDJSON line on disk: a timestamp plus the
@@ -76,6 +82,7 @@ func NewRunID() string {
 	}
 	return hex.EncodeToString(b[:])
 }
+
 
 // Storage is the persistence interface. Two implementations
 // (JsonFileStorage, future SqliteStorage) sit behind it; callers

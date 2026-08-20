@@ -334,7 +334,7 @@ func TestListRunsSortedAndFiltered(t *testing.T) {
 
 	t.Run("orphan skipped", func(t *testing.T) {
 		// Create a stray directory under runs/ with no state.json.
-		if err := os.MkdirAll(filepath.Join(runsDir(), "orphan"), 0o700); err != nil {
+		if err := os.MkdirAll(filepath.Join(s.runsDir(), "orphan"), 0o700); err != nil {
 			t.Fatalf("mkdir orphan: %v", err)
 		}
 		all, err := s.ListRuns(ctx, RunFilter{})

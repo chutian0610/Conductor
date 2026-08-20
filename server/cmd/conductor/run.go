@@ -19,6 +19,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"conductor/server/internal/cli"
 	"conductor/server/internal/protocol"
@@ -82,6 +85,14 @@ Flags:
 
 	handler := buildEventPrinter(stdout, f.JSON, f.Quiet)
 
+	// Watch for SIGTERM/SIGINT so `conductor cancel <runId>` can
+	// ask us to stop gracefully. The signal fires once and the
+	// runner transitions the run to status=cancelled.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(sigCh)
+	fmt.Fprintln(os.Stderr, "[run.go] pid=", os.Getpid(), " PATH=", os.Getenv("PATH"))
+
 	// Open storage. Phase 1 ships JsonFileStorage; future SqliteStorage
 	// drops in transparently via the Storage interface.
 	store, err := storage.NewJsonFileStorage()
@@ -106,9 +117,9 @@ Flags:
 
 	var result *protocol.AgentTurnResult
 	if sessionID != "" {
-		result, err = runner.InvokeWithSessionId(ctx, f.Spec, sessionID, prompt, runID, store, handler)
+		result, err = runner.InvokeWithSessionId(ctx, f.Spec, sessionID, prompt, runID, store, handler, sigCh)
 	} else {
-		result, err = runner.Invoke(ctx, f.Spec, prompt, runID, store, handler)
+		result, err = runner.Invoke(ctx, f.Spec, prompt, runID, store, handler, sigCh)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %s\n", err)
