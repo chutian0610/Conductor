@@ -153,10 +153,97 @@ type AgentSpec = {
 ```
 
 > 这是 `provider + skill + mcp + custom args + prompt` 的统一封装。Paseo 的 `AgentSessionConfig` + `providerOptions` + `toolPolicy` 三块合并后得到上面的形状。
+>
+> **v0.11 修订**:此形状与 Pi CLI flags 一一对应。Conductor 内部 AgentSpec 直接映射到 Pi session 配置参数(`provider`, `model`, `skills`, `mcpConfig`, `tools`, `thinking`, `cwd` 等)。详见 §5.2 Pi 集成层。
 
-## 5. Agent Provider 层
+## 5. Pi 集成层(Pi Integration Layer)
 
-### 5.1 抽象接口(TypeScript 版)
+> **v0.11 重大简化**:Conductor **只有 Pi 这一个 provider**,且与 Pi 深度集成。**不再有通用 provider 抽象**——直接用 `@earendil-works/pi-coding-agent` SDK 的类型。
+
+### 5.0 集成策略
+
+**Conductor 不重新发明 agent runtime**,而是:
+- ✅ **直接 import Pi SDK 类型**(`AgentSession`, `AgentProvider`, 等)
+- ✅ **直接用 Pi 的 skill 目录约定**(`$CONDUCTOR_HOME/skills/` = Pi skill 路径)
+- ✅ **直接用 Pi 的 MCP config 格式**(`--mcp-config` JSON)
+- ✅ **直接用 Pi 的 session JSONL** 作为持久化格式
+- ✅ **直接用 Pi 的取消 / approval / compaction 机制**
+- ✅ **直接用 Pi 的 context files**(`.conductor/context/*.md` 等)
+
+**Conductor 在 Pi 之上加的价值**:
+- PDCA / GSD workflow 引擎(§8)
+- 多 host Hub 调度(§10)
+- Per-task per-host contextBus(§12)
+- HOME 隔离(§6.2)
+- WorkflowContext 持久化 + 迁移
+- 取消三协议合一(§14)
+
+### 5.1 Pi SDK 集成(替换原通用 AgentClient 接口)
+
+```typescript
+// packages/provider/pi/index.ts —— 直接 re-export Pi SDK
+import {
+  AgentSession,
+  AgentProvider,
+  ModelDefinition,
+  // Pi SDK exports
+} from "@earendil-works/pi-coding-agent";
+
+// Conductor 不再包一层接口,直接用 Pi 类型
+export type ConductorSession = AgentSession;        // alias
+export type ConductorProvider = AgentProvider;      // "anthropic" | "openai" | ...
+export type ConductorModel = string;                // "claude-opus-4-6" | "gpt-5" | ...
+
+// Pi SDK 包装(只是构造参数)
+export interface ConductorLaunchSpec {
+  provider: AgentProvider;       // Pi provider
+  model: string;                 // Pi model
+  cwd: string;                   // Pi cwd
+  skills?: string[];             // Pi skill 路径
+  mcpConfig?: string;            // Pi MCP config 路径
+  systemPrompt?: string;         // Pi system prompt 追加
+  thinking?: "off" | "low" | "medium" | "high";
+  tools?: { allow?: string[]; exclude?: string[] };
+  // Conductor 注入
+  isolatedHome: string;          // §6.2 隔离 HOME 路径
+  sessionDir: string;            // Pi session 存放位置(在 $CONDUCTOR_HOME/runs/<runId>/pi-sessions)
+}
+
+export async function createPiSession(
+  spec: ConductorLaunchSpec,
+  signal?: AbortSignal,          // §14 取消
+): Promise<AgentSession> {
+  // Pi SDK 启动 session
+  // env 注入隔离 HOME(§6.2)
+  // AbortSignal → Pi session 的 cancel()
+}
+```
+
+> **v0.11 vs v0.10 对比**:v0.10 有通用 `AgentClient/AgentSession` 接口 + `PiAgentClient` 实现;v0.11 **删除接口**,Pi 类型直接用。
+
+### 5.2 Pi 概念映射(Conductor → Pi)
+
+| Conductor 概念 | Pi 等价物 | Conductor 如何复用 |
+|---|---|---|
+| AgentSpec.provider | `--provider` (Pi) | 直接传 |
+| AgentSpec.model | `--model` (Pi) | 直接传 |
+| AgentSpec.systemPrompt | `--append-system-prompt` (Pi) | 直接传 |
+| AgentSpec.skills | Pi skill 目录 | `$CONDUCTOR_HOME/skills/<name>/SKILL.md` 软链到 Pi 路径 |
+| AgentSpec.mcp | `--mcp-config` (Pi) | 直接传 JSON 路径 |
+| AgentSpec.tools | `--tools` / `--exclude-tools` (Pi) | 直接传 |
+| AgentSpec.thinking | `--thinking` (Pi) | 直接传 |
+| Session JSONL | Pi 自带 session 目录 | **直接读 Pi JSONL**,不复制 |
+| Resume | Pi session resume | 直接用 Pi API |
+| Compaction | Pi compaction | 直接用 Pi (`/compact` slash command) |
+| Skill (workflow) | Pi skill | Conductor skill 注册即 Pi skill |
+| Approval | Pi approval model | 直接用 Pi `await approval()`,Conductor 在上面包装 UI |
+| Slash command | Pi slash command | 直接暴露 |
+
+> **结论**:Conductor 的"skill / session / approval"等概念**全是 Pi 的概念**。Conductor 主要工作是:
+> 1. 包装 Pi SDK 启动逻辑
+> 2. 注入隔离 HOME(§6.2)
+> 3. 包装 Pi session → Conductor Runner
+> 4. 在 Pi 上 加 workflow / Hub / contextBus
 
 ```typescript
 // packages/protocol/src/provider.ts —— 跨 provider 抽象
@@ -222,36 +309,7 @@ export interface AgentSession {
 >
 > **v0.10 关键变更**(取消 escape hatch):Pi 不是 LLM wrapper,**Pi 是完整 coding agent**(内置 read/write/edit/bash 工具、session 管理、skill/extension 体系、MCP 支持)。它本身就能替代 Claude Code / Codex / OpenCode 的角色,且内置支持 20+ 模型。**Phase 1 完全不实现 Claude SDK escape hatch**——见 §5.2 Pi 实现细节。
 
-### 5.2 Provider 实现分类(三种接入策略)
 
-| 类型 | 适用 | 实现 | 示例 |
-|---|---|---|---|
-| **Native SDK** | 提供官方 SDK 且能力最强 | 直接调 SDK,自己管进程 | Claude Code SDK, Codex app-server |
-| **ACP** | 任何愿意走 stdio JSON-RPC 的 agent | 继承 `ACPAgentClient`,只填 command+argv+env | Pi, OMP, copilot, cursor, kimi, kiro, trae, 自定义 |
-| **HTTP / RPC** | 远程 agent 服务 | 实现一个轻量 wrapper,转成本地契约 | 内部 HTTP agent、第三方云 agent |
-
-> Paseo 实测 10+ provider 都跑得稳。我们采用相同的"两路 SDK + 一路 HTTP"格局。
-
-### 5.3 Provider Registry 与 Profile
-
-```ts
-// 参考 Paseo provider-registry.ts
-const ProviderDefinition = {
-  id: "claude",
-  enabled: true,
-  optionsSchema: ClaudeProviderOptionsSchema,  // Zod
-  derivedFromProviderId: null,                 // 继承链(自定义 profile 用)
-  createClient: (logger) => new ClaudeAgentClient({...}),
-  // ...
-};
-
-const registry = buildProviderRegistry({
-  runtimeSettings: loadRuntimeSettings(),
-  providerOverrides: loadCustomProviders(),   // 用户配置: extends: "claude"
-});
-```
-
-**Profile / 扩展机制**(直接借鉴 Paseo 的 `extends: "claude"` 语义):允许声明"我的 zai-profile 继承 claude,只换 command/argv/env 和 API base"。这覆盖了用户原始需求中的"对外暴露统一接口"。
 
 ## 6. Agent Runner 层
 
@@ -1653,17 +1711,24 @@ DELETE /v1/runs/<runId>?force=true            # 立即
 
 12. **过度工程风险(自我警告 — v0.5 新增)** —— "Player registry" / "Multi-host Hub" / "Seamless migration" 这些概念**容易被术语诱惑**(Multica 是团队协作平台所以需要这些,但 Conductor 是 dev 工具,用户场景不同)。v0.5 已自我修正砍掉 Hub/Migration,但 Phase 2+ 设计时仍要警惕:**新术语新抽象不要堆砌,先问"99% 用户场景真的需要吗?"**
 
+13. **Pi 依赖风险(v0.11 新增 — 关键)** —— Conductor v0.11 完全依赖 Pi(`@earendil-works/pi-coding-agent`)。Pi 是 Mario Zechner 个人项目(同一人做了 OpenCode),不是 OpenAI/Anthropic 那种基础设施级项目。**风险**:维护者精力转移 / 项目被弃 / 突然 breaking change / 安全漏洞无人修。**对策**:
+- 锁定 Pi 精确版本,跑回归测试防升级破坏
+- 跟踪 Pi upstream,贡献修复
+- 文档化 "Pi Pivot 退出计划"(如果 Pi 死了怎么办)
+- §5.2 保留接口设计的"可替换性"痕迹(虽然只跑 Pi,但代码不与 Pi 类型强耦合太深)
+- **诚实声明**:Conductor 项目寿命部分取决于 Pi 项目寿命
+
 11. **过度工程风险(自我警告)** —— "Player registry" / "Multi-host Hub" / "Seamless migration" 这些概念**容易被术语诱惑**(Multica 是团队协作平台所以需要这些,但 Conductor 是 dev 工具,用户场景不同)。v0.5 已自我修正砍掉 Hub/Migration,但 Phase 2+ 设计时仍要警惕:**新术语新抽象不要堆砌,先问"99% 用户场景真的需要吗?"**
 
-## 16. 已确认的关键决策(v0.10)
+## 16. 已确认的关键决策(v0.11)
 
 | 决策点 | 选定方案 | 章节 |
 |---|---|---|
 | Server 语言栈 | **TypeScript/Node.js**(单栈;AbortController 原生支持 §14) | §0, §17 |
 | WebUI 语言栈 | **TypeScript/Next.js 14** | §3 |
 | Phase 1 形态 | **本地优先**(local-first),单 host daemon,Paseo 模型;无 Hub | §10 |
-| Phase 1 provider 策略 | **Pi only**:`@earendil-works/pi-coding-agent` SDK → 20+ 模型 day-1 | §5.2 |
-| Phase 2+ provider | **不实现新 provider**;只在 Pi 真不够时(如 Phase 3+)才加 Claude SDK escape hatch | §5.2 |
+| Provider 策略 | **Pi 深度集成**:直接用 Pi SDK 类型、Pi skill、Pi session、Pi MCP、Pi approval、Pi cancellation | §5 |
+| Conductor 范围 | **只在 Pi 之上加价值**:workflow engine、Hub 调度、contextBus、HOME 隔离、persistence | §5.0 |
 | 多 host task 模型 | **task 不跨机器**;Hub(Phase 2+)= dispatcher,分发不同 task 给不同 host | §10.2 |
 | 跨 host session 迁移 | **彻底不做**(用户决策 v0.6) | §10.4 ~~删除~~ |
 | "无缝"边界 | **彻底不做**(用户决策 v0.6) | §10.5 ~~删除~~ |
@@ -2049,6 +2114,48 @@ type ACPParser struct{ /* 与 Codex 同,但方法名是 ACP 规范的 */ }
 ---
 
 ## 版本变更
+
+### v0.10 → v0.11(本次更新 — Pi 深度集成,完全去掉 Claude)
+
+**用户决策**:**完全去掉 Claude 支持,Pi 深度集成**。这不只是"不写 Claude provider",而是**直接复用 Pi 的所有概念**(类型、skill、session、MCP、approval、cancellation、context files)。
+
+**架构影响**(对比 v0.10):
+| 维度 | v0.10 (Pi 包装) | v0.11 (Pi 深度集成) |
+|---|---|---|
+| Provider 抽象 | 通用 `AgentClient/AgentSession` | **删除,直接用 Pi SDK 类型** |
+| Skill 系统 | Conductor 自己设计 | **直接复用 Pi skill 目录约定** |
+| Session 格式 | Conductor state.json + Pi JSONL | **Pi JSONL 作为 canonical** |
+| MCP 配置 | Conductor 自己管 | **直接用 Pi `--mcp-config`** |
+| 取消传播 | Conductor 自己包 | **直接调 Pi `cancel()`** |
+| 集成代码 | ~50 行 | **~30 行(直接 re-export Pi 类型)** |
+
+**§5 整章改写为"Pi 集成层"**:
+- §5.0 集成策略(Conductor 不 Re-invent Pi,而是直接消费)
+- §5.1 Pi SDK 集成(直接 import Pi SDK,删除通用接口)
+- §5.2 Pi 概念映射表(Conductor 概念 → Pi 等价物)
+  - AgentSpec → Pi `--provider`/`--model`/`--skills`/`--mcp-config`
+  - Session → Pi session JSONL(直接读)
+  - Compaction → Pi `/compact` slash command
+  - Approval → Pi approval model(直接 wrap)
+
+**§4 Agent Spec 修订**:形状与 Pi CLI flags 一一对应
+
+**§13 Phase 1 集成代码量**:`~50 行` → `~30 行`(直接 re-export Pi 类型,几乎无包装)
+
+**§16 决策表更新**:
+- "Phase 1 provider 策略" → "Provider 策略: Pi 深度集成"
+- 新增决策 "Conductor 范围: 只在 Pi 之上加价值 (workflow / Hub / contextBus / HOME / persistence)"
+
+**§15 自我审视新增第 13 条 — Pi 依赖风险**:
+- Pi 是 Mario Zechner 个人项目,非基础设施级
+- 对策:锁版本 + 回归测试 + 跟踪 upstream + Pivot 退出计划
+- 诚实声明:Conductor 项目寿命部分取决于 Pi
+
+**新风险与对策**(完整版见 §15.13):
+- Pi 维护者精力转移 / 项目被弃
+- Breaking change
+- 安全漏洞无人修
+- Phase 1 锁定精确 Pi 版本:`@earendil-works/pi-coding-agent@X.Y.Z`
 
 ### v0.9 → v0.10(本次更新 — 彻底简化:Pi only,无需 Claude SDK escape hatch)
 
