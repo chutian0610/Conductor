@@ -205,48 +205,145 @@ type AgentSpec = {
 - WorkflowContext 持久化 + cursor 恢复
 - 取消三协议合一(§14)
 
-### 5.1 Codex 集成(替换原 v0.11 Pi 集成)
+### 5.1 Codex 集成(Go)
 
-```typescript
-// packages/provider/codex/index.ts —— Codex app-server JSON-RPC 客户端
-import { CodexAppServer } from "@openai/codex-app-server-sdk";  // 假设 SDK
+```go
+// internal/provider/codex/client.go —— Codex app-server JSON-RPC 客户端
+package codex
 
-export interface ConductorAgentSession {
-  id: string;
-  provider: "codex";
-  send(prompt: AgentPrompt, signal?: AbortSignal): Promise<AgentTurnResult>;
-  events(): AsyncIterable<AgentStreamEvent>;
-  cancel(signal?: AbortSignal): Promise<void>;
-  close(): Promise<void>;
+import (
+    "bufio"
+    "context"
+    "encoding/json"
+    "fmt"
+    "io"
+    "os/exec"
+    "sync"
+)
+
+// CodexSession 是 Conductor 对 Codex app-server 的会话抽象
+type CodexSession struct {
+    cmd    *exec.Cmd
+    stdin  io.WriteCloser
+    stdout *bufio.Reader
+    events chan AgentStreamEvent
+    done   chan struct{}
+    mu     sync.Mutex
+    closed bool
 }
 
-export async function createCodexSession(
-  spec: ConductorLaunchSpec,
-  signal?: AbortSignal,
-): Promise<ConductorAgentSession> {
-  // 1. 读 ~/.codex/config.toml 解析 [model_providers] 配置
-  // 2. 找到对应的 model_provider,获取 base_url + env_key
-  // 3. spawn `codex app-server` subprocess
-  // 4. JSON-RPC over stdio 通信
-  // 5. AbortSignal 监听 → 调 RPC `interrupt`
-  // 6. session JSONL 写到 $CONDUCTOR_HOME/runs/<runId>/codex-sessions/
+type ConductorLaunchSpec struct {
+    // Codex app-server 参数
+    Model        string  // "anthropic/claude-opus-4-6" | "openai/gpt-5" | ...
+    // 上下文
+    Cwd          string
+    Worktree     *WorktreeSpec
+    // §6.2 隔离 HOME
+    IsolatedHome string
+    // 透传 Codex
+    MCPConfig    string
+    SystemPrompt string
+    Thinking     string  // "minimal" | "low" | "medium" | "high"
+    ToolsAllow   []string
+    ToolsExclude []string
 }
 
-export interface ConductorLaunchSpec {
-  // Codex app-server 参数
-  model: string;                  // "anthropic/claude-opus-4-6" | "openai/gpt-5" | ...
-  // 上下文
-  cwd: string;
-  worktree?: WorktreeSpec;
-  // §6.2 隔离 HOME
-  isolatedHome: string;
-  // 透传 Codex
-  mcpConfig?: string;
-  systemPrompt?: string;
-  thinking?: "minimal" | "low" | "medium" | "high";
-  tools?: { allow?: string[]; exclude?: string[] };
+func CreateCodexSession(
+    ctx context.Context,        // §14 取消入口
+    spec ConductorLaunchSpec,
+) (*CodexSession, error) {
+    // 1. 读 spec.HomeDir/.codex/config.toml 解析 [model_providers] 配置
+    cfg, err := parseCodexConfig(spec.IsolatedHome)
+    if err != nil { return nil, err }
+
+    // 2. 找对应 provider
+    provider, ok := cfg.ModelProviders[cfg.ModelProvider]
+    if !ok { return nil, fmt.Errorf("provider %q not found", cfg.ModelProvider) }
+
+    // 3. spawn `codex app-server` subprocess(绑 ctx)
+    cmd := exec.CommandContext(ctx, "codex", "app-server")
+    cmd.Dir = spec.Cwd
+    cmd.Env = append(os.Environ(),
+        "HOME="+spec.IsolatedHome,
+        "CODEX_MODEL_PROVIDER="+cfg.ModelProvider,
+        "OPENAI_BASE_URL="+provider.BaseURL,
+    )
+    stdin, _ := cmd.StdinPipe()
+    stdout, _ := cmd.StdoutPipe()
+
+    if err := cmd.Start(); err != nil { return nil, err }
+
+    sess := &CodexSession{
+        cmd:    cmd,
+        stdin:  stdin,
+        stdout: bufio.NewReader(stdout),
+        events: make(chan AgentStreamEvent, 64),
+        done:   make(chan struct{}),
+    }
+    go sess.pumpEvents()  // goroutine: 读 stdout → events channel
+
+    return sess, nil
+}
+
+// Send: 同步发送 prompt,等 Codex 响应
+func (s *CodexSession) Send(ctx context.Context, prompt AgentPrompt) error {
+    req := map[string]any{
+        "method": "prompt",
+        "params": prompt,
+    }
+    return s.writeJSON(req)  // JSON over stdin
+}
+
+// Events: 消费 event 流(多 turn)
+func (s *CodexSession) Events() <-chan AgentStreamEvent {
+    return s.events
+}
+
+// Cancel: §14 三路合一的 signal 入口
+func (s *CodexSession) Cancel(ctx context.Context) error {
+    // SIGTERM → grace → SIGKILL
+    _ = s.cmd.Process.Signal(syscall.SIGTERM)
+    select {
+    case <-s.done:
+    case <-time.After(30 * time.Second):
+        _ = s.cmd.Process.Kill()
+    }
+    return nil
+}
+
+// Close: 清理 subprocess
+func (s *CodexSession) Close(ctx context.Context) error {
+    s.mu.Lock()
+    if s.closed { s.mu.Unlock(); return nil }
+    s.closed = true
+    s.mu.Unlock()
+    _ = s.stdin.Close()
+    <-s.done
+    return s.cmd.Wait()
+}
+
+func (s *CodexSession) pumpEvents() {
+    defer close(s.done)
+    defer close(s.events)
+    for {
+        line, err := s.stdout.ReadString('\n')
+        if err != nil { return }
+        var ev AgentStreamEvent
+        if err := json.Unmarshal([]byte(line), &ev); err != nil { continue }
+        select {
+        case s.events <- ev:
+        case <-s.done:
+            return
+        }
+    }
 }
 ```
+
+> **v0.13 重写为 Go**:
+> - `exec.CommandContext(ctx, ...)` 自动绑 §14 取消信号
+> - `events chan AgentStreamEvent` 取代 `AsyncIterable`
+> - `context.Context` 取代 `AbortSignal`(Go 原生一等公民)
+> - 单 binary 发行(`go install` / `go build`)
 
 ### 5.2 Codex provider 配置(用户侧)
 
@@ -1993,7 +2090,7 @@ DELETE /v1/runs/<runId>?force=true            # 立即
 
 8. ~~**Hub 的可靠性是单点**~~ —— **v0.6 彻底撤销**(Hub 现在是 Phase 2+ dispatcher,且不做迁移;可靠性要求大幅降低)。
 
-9. **测试与并发模型** —— §14 已给出 cancellation 协议。Phase 1 无跨 host,验证范围缩小;但 §8 parallel stage 仍要死锁检测 + `go test -race`。Phase 2+ Hub dispatcher 的"host 调度一致性"需要 e2e 测试。
+9. **测试与并发模型** —— §14 已给出 cancellation 协议。Phase 1 无跨 host,验证范围缩小;但 §8 parallel stage 仍要死锁检测 + `go test -race`(Go 优势:`-race` 内置)。Phase 2+ Hub dispatcher 的"host 调度一致性"需要 e2e 测试。
 
 10. **Provider 版本兼容** —— Claude Code SDK、Codex app-server 都在快速迭代。Provider 实现必须把"哪些字段是稳定的、哪些会变"显式标注,**当前未约定 deprecation 策略**。
 
@@ -2014,7 +2111,7 @@ DELETE /v1/runs/<runId>?force=true            # 立即
 
 | 决策点 | 选定方案 | 章节 |
 |---|---|---|
-| Server 语言栈 | **TypeScript/Node.js**(单栈;AbortController 原生支持 §14) | §0, §17 |
+| Server 语言栈 | **Go**(单 binary `~30MB`;context.Context 原生支持 §14) | §0, §17 |
 | WebUI 语言栈 | **TypeScript/Next.js 14** | §3 |
 | Phase 1 形态 | **本地优先**(local-first),单 host daemon,Paseo 模型;无 Hub | §10 |
 | Provider 策略 | **Codex only + OpenRouter 多模型**——OpenAI 维护的 app-server;`~/.codex/config.toml` 配 `[model_providers.openrouter]` 覆盖 100+ 模型 | §5 |
