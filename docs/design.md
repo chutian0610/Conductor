@@ -850,17 +850,23 @@ $CONDUCTOR_HOME/
 | Run A stage 1 用 spec P1(OpenRouter/Claude)| `specs/P1/home/` → config.toml 写 openrouter |
 | Run A stage 2 用 spec P2(OpenAI/GPT-5)| `specs/P2/home/` → 不同 HOME,config.toml 写 openai |
 | 同 spec 多次 invoke | 共享 `specs/P1/home/`,session JSONL 可 resume |
-| 并发不同 run 用同 spec | 共享 `specs/P1/home/`,session ID 唯一不冲突 |
+| 并发不同 run 用同 spec | 共享 `specs/P1/home/`(假设不发生,见下)|
 | Spec 改 provider | 用户新建 spec,新 specId,新 HOME |
 
-**Per-Spec HOME 并发风险**(诚实):
+**v0.12 假设**:**同一 spec 不会并发 invoke**。
 
-| 共享资源 | race 风险 | 缓解 |
-|---|---|---|
-| `config.toml` | ❌ 只读(创建后不变)| 无 race |
-| Session JSONL | ✅ session ID 唯一 | 文件名不冲突 |
-| `auth.json` symlink | ❌ symlink 不变 | 无 race |
-| Codex 内部 state | ⚠️ 可能短暂 race | 加 file lock(Phase 1 可不实现,接受 race)|
+理由:
+- Spec 是 managed 资源(CLI/UI 创建,持久)
+- `conductor run --spec <id>` 是 invocation 的唯一入口
+- 管理页面保证不会同时启动两个相同 spec 的 invocation(UX 层防)
+- 真要并发,用户显式创建两个不同 spec(自然隔离)
+
+**为什么不做并发保护**:
+- 用户场景里几乎不会出现"同 spec 并发 invoke"
+- Codex 内部 state 写冲突是边缘 case,加 file lock 复杂度不值得
+- 如果 Phase 3+ 真有需求,加 file lock 是 ~10 行代码
+
+**Spec 持久化结构**:
 
 **`specId` 来源**(v0.12 决定):
 
