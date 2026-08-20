@@ -693,6 +693,138 @@ func (h *PlayerHub) MigrateWorkflow(wf WorkflowID, from, to PlayerID) error {
 
 
 
+### 10.5 同 Provider Task 的"无缝"边界
+
+> v0.4 补充。用户问题:"task 使用同一种 provider 是不是就可以无缝迁移?"
+>
+> **答案:是的——这是 §10.4 SessionMigrator 设计的 happy path。** 但"无缝"有清晰边界,这里列清楚。
+
+#### 10.5.1 Happy Path 流程(同 provider task 跨 host)
+
+```
+host A 失联 → Hub 心跳超时 → cancel host A 上 stage(§14)
+→ ClaudeSessionMigrator.ExportSession(读 JSONL + git bundle)
+→ Hub 传 snap 到 host B
+→ ClaudeSessionMigrator.ImportSession(写回 JSONL + 解 bundle)
+→ spawn `claude --resume <session-id>` 接着跑
+→ WorkflowState.cursor 让 workflow engine 从对的 stage 续
+```
+
+只要 task 全程用同 provider,这条链路就是设计 happy path。
+
+#### 10.5.2 "无缝"的三档定义
+
+| 状态类别 | 能否迁移 | 说明 |
+|---|---|---|
+| **对话层**(conversational) | ✅ **完全无缝** | 用户零感知 |
+| **配置层**(config) | ✅ **完全无缝** | 文件级搬运 |
+| **运行层瞬态**(runtime ephemeral) | ⚠️ **几十秒级重连** | 用户短暂感知 |
+| **运行层有状态**(stateful) | ❌ **无法迁移** | 需在 workflow spec 里避坑 |
+
+#### 10.5.3 完全无缝(用户零感知)
+
+- **多轮对话历史**:Claude JSONL 文件 `~/.claude/projects/<project>/<session-id>.jsonl` 完整搬运,`--resume` 重建上下文
+- **Tool call 历史**:Claude 自己 replay tool call 历史,无需 Conductor 干预
+- **Tool 结果**:同上,JSONL 含完整 tool_use / tool_result
+- **工作目录**:worktree git bundle + uncommitted patch,目标 host 重建完整 git state
+- **Workflow 进度**:`WorkflowState.cursor` 完整搬运(§12.8),engine 从对的 stage 续
+- **Skill 列表**:SKILL.md 文件随 worktree 一起搬
+- **MCP 配置**:`.mcp.json` 配置文件搬运
+- **Agent spec / 启动参数**:`AgentSpec` 在 `WorkflowState` 里持久化
+
+#### 10.5.4 短暂重新初始化(几十秒级)
+
+- **MCP server 子进程**:Playwright、数据库连接等在 host A 上是 Claude 的 child process;迁移后需重启
+  - 影响:用户看到几秒到几十秒的"等待"(类似 CLI 启动时间)
+  - 缓解:Phase 2 可做 MCP 连接池 / 健康检查
+- **活动的 file watcher**:`fswatch` / `chokidar` 等:进程死了,新 host 重启
+- **dev server / hot reload**:Vite dev server 等:同 file watcher
+- **Pending permission request**:用户在 host A 上点了"允许",host A 死了;新 host 上需重新批准
+  - 缓解:Phase 2 可做"permission cache"持久化已批准列表
+
+#### 10.5.6 无法迁移(workflow 设计需避坑)
+
+- **中间 stateful 操作的部分完成状态**:例:
+  - 跑到一半的数据库 migration(部分表已迁移)
+  - 大文件 atomic rename 进行到一半
+  - 分布式锁已获取未释放
+- **长连接**:SSH session / 长寿命 WebSocket / streaming HTTP response
+- **Background process**:在 host A 上 `nohup ... &` 启动的后台进程
+
+> **关键边界**:这是**现实约束**,与 Conductor 实现无关。Conductor 的应对是:
+> - 在 §8 workflow spec 提示用户标记"长操作 stage"(用 `idempotent: false` 标记)
+> - 给 stage 加 retry 安全检查(§14.7)
+> - 文档警告:不要在 stage 中发起"不可中断的长连接"
+
+#### 10.5.7 Hub 减少迁移触发频率
+
+§10.3 的策略减少实际触发概率:
+
+- **健康 host**:零迁移,纯同 host 调度
+- **短暂失联**:30s 心跳超时后才触发(可配)
+- **多 stage 串行**:Hub 选能跑**整个 workflow** 的 host,避免中途迁移(基于 workflow spec 的 provider 列表 + host 能力 tag)
+- **失败慢回退**:Hub 收到 host 警告但还没失联时,可主动 drain 现有 stage(§14.6)再迁移
+
+#### 10.5.8 多 Provider Task 的复杂度(Phase 2+)
+
+如果将来有"Plan=Claude, Do=Codex, Check=Claude"这种**单 run 跨 provider**:
+
+```go
+type WorkflowState struct {
+    // ...
+    Stages map[string]StageOutput
+    StageProvider map[string]string  // stage → provider(新增字段)
+    // 每个 stage 单独有 session,需各自迁移
+}
+```
+
+迁移时:
+1. Hub 看 `StageProvider` map,知道这个 workflow 用了哪些 provider
+2. 选目标 host 时加约束:`Selector.RequireProviders = ["claude", "codex"]`
+3. 每个 stage 单独调对应 `SessionMigrator`
+4. 跨 provider stage 边界迁移时,**没有跨 provider 翻译**——只是把 A provider 的 stage 在目标 host 重启,从 stage output 重读上下文(走 §12.11 briefing 形式)
+
+**Phase 1 影响**:无。Phase 1 单 provider,这个问题不存在。
+
+#### 10.5.9 e2e 测试矩阵(Phase 1 必须)
+
+| 测试 ID | 场景 | 期望 |
+|---|---|---|
+| `T_session_resume_same_host` | 同 host 中断 + `--resume` | 对话上下文完整保留 |
+| `T_migrate_cross_host` | host A → host B 迁移 | 用户看到任务接着跑,对话无损失 |
+| `T_mcp_reconnect` | MCP server 中断 | 自动重连,无用户感知 |
+| `T_permission_recache` | pending permission 迁移 | 用户在新 host 重新批准 |
+| `T_stateful_op_warning` | stateful 操作中断 | workflow 文档警告 + stage 标 `stateful: true` |
+| `T_drain_before_migrate` | Hub drain 模式 | stage 在 timeoutMs 内优雅收尾,然后迁移 |
+| `T_workflow_resume_after_migrate` | 迁移后 workflow 续跑 | cursor 正确,stage 顺序不乱 |
+
+#### 10.5.10 用户 FAQ
+
+**Q:迁移会不会丢对话?**
+
+A:不会。Claude JSONL 是真实持久化的(每次 turn 写入),ExportSession 读它就拿到了。
+
+**Q:迁移会不会丢未提交代码?**
+
+A:不会。`git diff HEAD` 在迁移前自动打包,目标 host `git apply`。
+
+**Q:迁移要多久?**
+
+A:取决于 payload:
+- 小对话(< 1MB):< 5s
+- 大 worktree(100MB uncommitted):30-60s
+- 超大 worktree(GB 级):分钟级 + 压缩 + 分片
+
+**Q:用户需要做什么?**
+
+A:**零**。Hub 自动检测 → 迁移 → 续跑;UI 上能看到"migrated from host-a"的事件。
+
+**Q:如果用户在迁移过程中发命令?**
+
+A:`conductor send` / `cancel` 都通过 Hub 路由,Hub 把命令转到当前 host;迁移期间命令排队,迁移完成后投递。
+
+---
+
 ## 11. 持久化与可观测
 
 ### 11.1 持久化
@@ -1839,6 +1971,28 @@ type ACPParser struct{ /* 与 Codex 同,但方法名是 ACP 规范的 */ }
 - webui 何时启动(Phase 1 同步 vs Phase 2 末 vs Phase 3)
 - CLI flag 库终选(cobra vs stdlib flag)
 - OpenAPI 生成工具(swag vs ogen vs hand-written)
+
+**v0.4 后续追加(第四轮 — 同 provider 迁移边界澄清)**:
+
+**用户问题**:"task 使用同一种 provider 是不是就可以无缝迁移?"
+**答案**:**是的——这是 §10.4 SessionMigrator 设计的 happy path**。但"无缝"有清晰的三档边界:
+- **对话/配置层**:完全无缝(用户零感知)
+- **运行层瞬态**(MCP / watcher):几十秒级重连
+- **运行层有状态**(DB migration / 长连接):无法迁移,需 workflow 设计避坑
+
+**新增 §10.5 同 Provider Task 的"无缝"边界**(10 小节):
+- §10.5.1 Happy path 流程(同 provider 跨 host)
+- §10.5.2 "无缝"三档定义表
+- §10.5.3 完全无缝(7 类状态)
+- §10.5.4 短暂重新初始化(4 类,MCP / watcher / dev server / permission)
+- §10.5.5 无法迁移(3 类,stateful op / background / 长连接)
+- §10.5.6 Hub 减少迁移触发频率策略
+- §10.5.7 多 Provider Task 复杂度(Phase 2+ 才有)
+- §10.5.8 e2e 测试矩阵(7 个测试 ID)
+- §10.5.9 用户 FAQ(5 个常见问题)
+- §10.5.10 与 §10.4 的关系(范围 vs 机制)
+
+§10.5 是 §10.4 的"边界表",告诉读者**哪些场景完美工作、哪些有降级、哪些不行**。
 
 **v0.4 后续追加(第三轮 — 关键架构决策)**:
 
