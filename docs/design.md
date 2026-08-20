@@ -220,7 +220,7 @@ export interface AgentSession {
 >
 > `AbortController` 多源合并(`AbortSignal.any([user, hub, workflow])`)是 §14 三路合一在 Node 下的答案。
 >
-> **Pi-first 集成**:第 5.2 节会展示为什么 Pi SDK 让"一个 provider = 20+ 模型"。
+> **v0.10 关键变更**(取消 escape hatch):Pi 不是 LLM wrapper,**Pi 是完整 coding agent**(内置 read/write/edit/bash 工具、session 管理、skill/extension 体系、MCP 支持)。它本身就能替代 Claude Code / Codex / OpenCode 的角色,且内置支持 20+ 模型。**Phase 1 完全不实现 Claude SDK escape hatch**——见 §5.2 Pi 实现细节。
 
 ### 5.2 Provider 实现分类(三种接入策略)
 
@@ -1402,13 +1402,13 @@ Phase 2:
   - worktree/ 自动隔离
   - cancellation/ §14 协议落地 + 单 host e2e
   - **Hub as dispatcher(§10.2)** —— 多 host 分发不同 task
-  - **Provider 扩展** —— + Claude SDK(escape hatch,Pi 不够时用)
-  - 可选 + Codex / Omp / ACP-generic
+  - (不实现 Claude SDK,见 Phase 3+)
 
-Phase 3:
-  - provider/ 扩到 3+ provider(Codex、Paseo ACP 类);迁移能力按 provider 扩展
+Phase 3+ (按需):
+  - **其他 provider 仅在 Pi 不够时**——如 Claude SDK escape hatch(若 Pi 某些 feature 缺失)
   - provider-subagents/ 跟踪 + UI(可选 web)
   - 更多编排原语(join 策略、loop 条件)
+  - 多个 ACP provider(若 Pi 不能满足某些 ACP 场景)
 
 Phase 4:
   - Hub HA(主备/共识)
@@ -1655,15 +1655,15 @@ DELETE /v1/runs/<runId>?force=true            # 立即
 
 11. **过度工程风险(自我警告)** —— "Player registry" / "Multi-host Hub" / "Seamless migration" 这些概念**容易被术语诱惑**(Multica 是团队协作平台所以需要这些,但 Conductor 是 dev 工具,用户场景不同)。v0.5 已自我修正砍掉 Hub/Migration,但 Phase 2+ 设计时仍要警惕:**新术语新抽象不要堆砌,先问"99% 用户场景真的需要吗?"**
 
-## 16. 已确认的关键决策(v0.9)
+## 16. 已确认的关键决策(v0.10)
 
 | 决策点 | 选定方案 | 章节 |
 |---|---|---|
 | Server 语言栈 | **TypeScript/Node.js**(单栈;AbortController 原生支持 §14) | §0, §17 |
 | WebUI 语言栈 | **TypeScript/Next.js 14** | §3 |
 | Phase 1 形态 | **本地优先**(local-first),单 host daemon,Paseo 模型;无 Hub | §10 |
-| Phase 1 provider 策略 | **Pi-first**:`@earendil-works/pi-coding-agent` SDK → 20+ 模型 day-1 | §5.2 |
-| Phase 2+ provider | 加 Claude SDK(escape hatch)+ 其他直接集成 | §5.2 |
+| Phase 1 provider 策略 | **Pi only**:`@earendil-works/pi-coding-agent` SDK → 20+ 模型 day-1 | §5.2 |
+| Phase 2+ provider | **不实现新 provider**;只在 Pi 真不够时(如 Phase 3+)才加 Claude SDK escape hatch | §5.2 |
 | 多 host task 模型 | **task 不跨机器**;Hub(Phase 2+)= dispatcher,分发不同 task 给不同 host | §10.2 |
 | 跨 host session 迁移 | **彻底不做**(用户决策 v0.6) | §10.4 ~~删除~~ |
 | "无缝"边界 | **彻底不做**(用户决策 v0.6) | §10.5 ~~删除~~ |
@@ -2049,6 +2049,43 @@ type ACPParser struct{ /* 与 Codex 同,但方法名是 ACP 规范的 */ }
 ---
 
 ## 版本变更
+
+### v0.9 → v0.10(本次更新 — 彻底简化:Pi only,无需 Claude SDK escape hatch)
+
+**用户问题**:"用 Pi 的话,先忽略 Claude Code,是不是可以直接 API 方式使用 Codex 和其他大量模型?"
+**答案**:**是**——Pi 本身就是完整 coding agent(类 Claude Code/Codex),已支持 20+ 模型,无需任何 escape hatch。
+
+**Pi 不只是 LLM wrapper**:
+- 内置 read/write/edit/bash 工具
+- session 管理(branching、compaction)
+- skill / extension / package 体系
+- MCP 支持
+- 多模型(20+ provider)
+- RPC + SDK 双重集成方式
+
+也就是说,**Pi 完全能替代 Claude Code / Codex / OpenCode 的角色**,Conductor 不需要为这些单独写 provider 适配。
+
+**Phase 1 简化效果**:
+
+| 维度 | v0.9 (Pi + Claude SDK) | v0.10 (Pi only) |
+|---|---|---|
+| Phase 1 provider 数 | 2 | **1** |
+| 集成代码量 | ~300 行 | **~50 行** |
+| 多模型 day-1 | ✅ Pi 覆盖 | ✅ Pi 覆盖 |
+| Claude 直连 escape hatch | ✅ Phase 2 | ❌ Phase 3+ 视需求 |
+| 维护负担 | 2 个 SDK | **1 个** |
+
+**§5.1 注释更新**:v0.10 关键变更说明 Pi 不是 LLM wrapper 而是完整 coding agent,无需 Claude SDK escape hatch
+
+**§13 Phase 1 路线图更新**:
+- 集成代码量:~300 行 → **~50 行**(纯 Pi SDK 包装)
+- 时间估算:~2 周保持
+- Phase 2:不再列"加 Claude SDK"
+- Phase 3+:仅在 Pi 真不够时考虑 escape hatch
+
+**§16 决策表更新**:
+- Phase 1 provider:**Pi only**(从"Pi-first + escape hatch"→ "Pi only")
+- Phase 2+ provider:**不实现**(从"加 escape hatch"→ "按需")
 
 ### v0.8 → v0.9(本次更新 — Server 改 Node.js,Provider 改 Pi-first)
 
