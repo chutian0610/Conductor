@@ -821,6 +821,149 @@ Agent **自主决定**什么时候拉什么。这是"agent 协作逻辑"层—�
 - Phase 2 末:Layer 3 适配(provider hook)
 - Phase 4+:Layer 4
 
+### 12.11 Handoff & Session Transfer
+
+> v0.4 补充。用户问题:"CLI 方式是不是没法实现 Paseo 的 handoff 逻辑?"
+
+#### 12.11.1 Paseo 的 handoff 是什么(从源码确认)
+
+读完 `references/paseo/skills/paseo-handoff/SKILL.md`,Paseo 的 handoff 是:
+
+> **A prompt template + MCP tool invocation, NOT an SDK protocol feature.**
+> "The receiving agent starts with zero context, so the handoff prompt must be a self-contained briefing."
+
+具体步骤(SKILL.md 原文):
+1. 调 `list_profiles` 选接收方 profile
+2. 写结构化 briefing:Task / Context / Relevant files / Current state / What was tried / Decisions / Acceptance criteria / Constraints
+3. 调 `create_agent` 启动新 agent,initialPrompt = briefing
+4. 传 workspaceId(可选 worktree 隔离)
+5. 不等结果,返回 agent 给用户
+
+#### 12.11.2 三种 handoff 形态的可行性
+
+| 形态 | Paseo | Conductor (CLI 模式) | 备注 |
+|---|---|---|---|
+| **显式 briefing** (人类结构化 prompt 传给新 agent) | ✅ | ✅ | prompt 工程,与协议无关 |
+| **同 provider session 续跑** (`claude --resume <id>` / app-server resume) | ✅ | ✅ | CLI 自身能力 |
+| **跨 provider 状态深传** (Claude 多轮 + tool 结果 → Codex) | ❌ | ❌ | open problem;SDK 也不解决 |
+
+> **关键边界**:前两种 CLI 完全够用;第三种本质是 "把 A 的对话翻译成 B 能消费的 prompt"——这是 LLM 工作,不是协议工作。
+
+#### 12.11.3 Conductor 的 handoff 设计
+
+Conductor 比 Paseo 多两个 handoff 优势,因为 §12 已设计好:
+
+**1) Briefing 模板 + 结构化输入**
+
+```go
+// internal/handoff/briefing.go
+type Briefing struct {
+    Task             string   `json:"task"`
+    Context          string   `json:"context"`
+    RelevantFiles    []string `json:"relevantFiles"`
+    CurrentState     string   `json:"currentState"`
+    WhatWasTried     []Attempt `json:"whatWasTried"`
+    Decisions        []Decision `json:"decisions"`
+    AcceptanceCriteria []string `json:"acceptanceCriteria"`
+    Constraints      []string `json:"constraints"`
+    // 自动从 §12 contextBus 提取
+    AutoAttachments  []Ref    `json:"autoAttachments"`  // 工作文件、worktree、session handles
+}
+
+func ComposeBriefing(ctx StageContext) Briefing { ... }
+```
+
+**2) 跨 stage handoff(原生,不需要显式 skill)**
+
+§12.2-12.4 已经把 handoff 做了——上一 stage 的 `StageOutput`(data + refs)就是天然 briefing。**Workflow engine 跨 stage 传递 = 结构化 handoff**,比 Paseo 的"自己手写 briefing"更系统。
+
+**3) 显式 CLI handoff(用户主动触发)**
+
+```go
+// internal/handoff/transfer.go
+type TransferRequest struct {
+    To            AgentSpec         // 接收方 spec
+    WorkspaceID   string            // 可选,worktree 隔离
+    Briefing      Briefing          // 显式 briefing
+    InheritRefs   []Ref             // 继承的 ref(工作文件 / session handle)
+    ResumeSession bool              // 同 provider 是否续 session
+}
+
+func (e *Engine) Handoff(ctx context.Context, req TransferRequest) (*AgentRunner, error) {
+    // 1. 拼装 initialPrompt = briefing markdown + 自动段(从 inherit refs)
+    initialPrompt := composeInitialPrompt(req)
+
+    // 2. 创建 workspace(如指定)
+    if req.WorkspaceID == "" { req.WorkspaceID = createWorktree(ctx) }
+
+    // 3. 启动新 agent(走 §5.1 AgentClient.CreateSession)
+    runner, err := e.registry.CreateAgent(ctx, req.To, initialPrompt, req.WorkspaceID)
+
+    // 4. 标记旧 agent 为 "handed-off"(可选自动 archive)
+    if old, ok := e.registry.GetAgent(req.FromAgentID); ok {
+        old.MarkHandedOff(runner.ID())
+    }
+
+    return runner, nil
+}
+```
+
+**4) Session handle 作为 ref 传递**
+
+```go
+// Ref 系统中已有 session kind(§12.5):
+{ kind: "session", provider: "claude", handle: AgentPersistenceHandle }
+
+// 接收方 agent 启动时:
+//   如果 spec.resumeSession && ref 是同 provider:
+//     → ResumeSession(ctx, ref.handle) — 直接续 session
+//   否则:
+//     → CreateSession(...) — 新 session,briefing 作 initialPrompt
+```
+
+#### 12.11.4 与 Paseo 对比
+
+| 维度 | Paseo handoff | Conductor handoff |
+|---|---|---|
+| 触发方式 | Skill(用户或 LLM 主动) | CLI / Workflow 自动 / Skill |
+| Briefing 结构 | 固定模板(Markdown) | 固定模板 + autoAttachments |
+| 跨 stage 自动 handoff | ❌(要 LLM 自己写 briefing) | ✅(`StageContext.Prev` 自动) |
+| 跨 provider | ❌(只能 briefing 形式) | ❌(同 Paseo,open problem) |
+| 同 provider session resume | ❌(handoff 不传 session handle) | ✅(传 session ref,可选 resume) |
+| Worktree 隔离 | ✅(`create_workspace` 工具) | ✅(§10.3 同样支持) |
+
+> **Conductor 优势**:同一 provider 的 session resume 通过 Ref 系统原生支持;跨 stage 的结构化 handoff 通过 WorkflowContext 原生支持。**Paseo 的 handoff 反而是"绕过 SDK 自己写 prompt 模板",Conductor 是把这种 handoff 内化为引擎能力。**
+
+#### 12.11.5 CLI 形态
+
+```bash
+# 1) 用户主动 handoff
+conductor handoff --from <agent-id>   --to codex/gpt-5.5   --briefing ./briefing.md   --worktree feature-x
+
+# 2) Workflow 自动 handoff(在 stage spec 里声明)
+{
+  "name": "review_pr",
+  "type": "handoff",
+  "to": "claude/opus-4.6",
+  "inheritRefs": ["diff", "worktree"],
+  "resumeSession": false,
+  "briefing": {
+    "template": "./templates/review-pr.md",
+    "autoFill": ["pr.url", "pr.title", "diff.summary"]
+  }
+}
+
+# 3) handoff 后的 agent 出现在 §10 PlayerRegistry
+conductor ls
+  # → 列出原 agent (状态: handed-off → archive) + 新 agent
+```
+
+#### 12.11.6 不做的事(诚实清单)
+
+- **不做**跨 provider 状态翻译(把 Claude 多轮 JSONL 转成 Codex prompt)
+- **不做**自动 LLM-driven handoff(由 planner 决定何时 handoff);交回 §8.5 planner 由用户 skill 定义
+- **不做** handoff 反悔/撤销;transfer 是一旦创建就 forward-only
+
 ---
 
 ## 13. 实施路线图
@@ -1449,6 +1592,8 @@ type ACPParser struct{ /* 与 Codex 同,但方法名是 ACP 规范的 */ }
 
 > **结论**:Go 后端不"丢失" Claude SDK,而是**绕开 SDK 直连 CLI**——SDK 的价值在 Go 里被 §17.7.4 的 `SubprocessClient` + `ProtocolParser` 替代,且**统一性更高**。
 
+**关于 handoff**:Paseo 的 handoff(见 `skills/paseo-handoff/SKILL.md`)是 prompt 模板 + `create_agent` 工具调用,**不是 SDK 协议能力**。CLI 模式完全支持——详见 §12.11 Handoff & Session Transfer。
+
 ## 附录 B:已读的竞品源文件清单(供追溯)
 
 - Paseo:
@@ -1507,9 +1652,24 @@ type ACPParser struct{ /* 与 Codex 同,但方法名是 ACP 规范的 */ }
 - CLI flag 库终选(cobra vs stdlib flag)
 - OpenAPI 生成工具(swag vs ogen vs hand-written)
 
-**v0.4 后续追加**:
+**v0.4 后续追加(第二轮)**:
 
-**用户问题回应**:Go 后端不能直接用 Claude Agent SDK(TS-only),但这反而是收益——SDK 是 CLI 的薄包装,Go 直连 CLI 可让所有 provider 统一为 `SubprocessClient + ProtocolParser` 一种接法(§17.7)。Paseo 因 TS 有 SDK/ACP/app-server 三种接法,Conductor 只有一种。
+**用户问题回应(SDK + handoff)**:
+1. Codex 用 `app-server` 因为 OpenAI 官方提供;Claude Code 没有等价物,只有 CLI——这是 provider 决定的,不是 Conductor 选择的
+2. Paseo 的 handoff(读完 `skills/paseo-handoff/SKILL.md` 确认)是 **prompt 模板 + `create_agent` 工具调用**,**不是 SDK 协议能力**。CLI 模式完全支持
+3. 跨 provider 状态深传(Claude 多轮 → Codex)是 **open problem**,SDK 也不解决
+
+**新增 §12.11 Handoff & Session Transfer**(6 小节):
+- §12.11.1 Paseo handoff 是 prompt 工程(源码确认)
+- §12.11.2 三种 handoff 形态的可行性表
+- §12.11.3 Conductor handoff 设计(Briefing struct + TransferRequest + 4 类实现)
+- §12.11.4 与 Paseo 对比(Conductor 在跨 stage 自动 handoff + 同 provider session resume 有优势)
+- §12.11.5 CLI 形态(3 种触发方式)
+- §12.11.6 不做的事(诚实清单)
+
+§17.7 末尾更新,显式说"handoff 不依赖 SDK,详见 §12.11"。
+
+**v0.4 后续追加(第一轮)**:
 
 **新增 §17.7 Provider SDK 不依赖性**(6 小节):
 - §17.7.1 SDK 本质是薄包装的说明
