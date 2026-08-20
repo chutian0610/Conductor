@@ -465,9 +465,9 @@ class ProviderSubagentStore {
 | **配置冲突** | 用户改全局设置 → Conductor 下次 spawn 用新设置,行为不可预期 |
 | **并发写同一文件** | OAuth refresh、设置更新可能撞车 |
 | **审计混乱** | 用户的 `~/.claude/logs/` 混了 Conductor 活动 |
-| **Provider config 冲突(v0.12 新增)** | **Codex runtime 锁定一个 provider**,同一 HOME 下两次 spawn 想用不同 provider,后一次必须覆盖 config.toml;正在跑的 process 可能未释放文件。**per-invocation 隔离 HOME 解决** |
+| **Provider config 冲突(v0.12 新增)** | **Codex runtime 锁定一个 provider**,两个 spec 想用不同 provider 时,共享 HOME 会导致 config.toml 冲突。**per-spec 隔离 HOME 解决**(不同 spec 不同 HOME) |
 
-#### 6.2.2 设计:Per-Invocation 隔离 HOME + Auth Symlink + 动态 config.toml
+#### 6.2.2 设计:Per-Spec 隔离 HOME + Auth Symlink + 动态 config.toml
 
 ```go
 // internal/runner/isolated_home.go
@@ -570,14 +570,14 @@ cmd.Dir = spec.WorktreePath()
 
 | 决策 | 理由 |
 |---|---|
-| **Per-invocation 隔离 HOME**(不是 per-run,不是 per-session) | **v0.12 修订**——Codex runtime 锁定一个 provider,每 stage 不同 provider 需独立 config.toml;per-invocation(每次 Codex spawn)才能支持异构 provider |
-| **Symlink auth 到 `$CONDUCTOR_HOME/.auth/<provider>/`**(按 provider 分目录) | **v0.12 新增**——不同 provider 可能有不同 auth(OpenAI key vs OpenRouter key vs 本地无 auth) |
+| **Per-spec 隔离 HOME**(不是 per-run,不是 per-invocation) | **v0.12 二次修正**(用户洞察)——spec 是用户定义的复用单元,HOME 与 spec 同生命周期;同 spec 多次 invoke 共享 HOME,session 可 resume |
+| **Symlink auth 到 `$CONDUCTOR_HOME/.auth/<provider>/`**(按 provider 分目录) | 不同 provider 可能有不同 auth(OpenAI key vs OpenRouter key vs 本地无 auth) |
 | **Symlink .auth/ 里的文件到用户 HOME** | 默认仍跟用户 OAuth 实时同步 |
-| **动态生成 `~/.codex/config.toml`** | **v0.12 新增**——Conductor 按 spec.provider 写 config.toml 到 HOME,user 不需要手动管 |
-| **隔离 session / logs / MCP config** | Conductor 产生的状态,不该污染用户,也不该 run 间互窜 |
-| **位置:`$CONDUCTOR_HOME/runs/<runId>/stages/<stageId>/`** | **v0.12 修订**——stage 级 HOME,与 Codex process 同生命周期 |
+| **动态生成 `~/.codex/config.toml`**(spec 创建时一次写) | **v0.12 新增**——Conductor 按 spec.provider 写 config.toml 到 HOME,user 不需要手动管;后续 invoke 只读 |
+| **隔离 session / logs / MCP config** | Conductor 产生的状态,不该污染用户,也不该 spec 间互窜 |
+| **位置:`$CONDUCTOR_HOME/specs/<specId>/home/`** | **v0.12 二次修正**——spec 级 HOME,跨 run 持久,session JSONL 可跨 invoke resume |
 | **权限 0700** | auth token 敏感 |
-| **默认保留 Cleanup**(不删) | 便于 inspect session JSONL;`conductor prune --run <id>` 时清 |
+| **默认保留 Cleanup**(不删) | 便于 inspect session JSONL;`conductor prune --spec <id>` 时清 |
 
 #### 6.2.4 边界与副作用
 
@@ -587,89 +587,129 @@ cmd.Dir = spec.WorktreePath()
 5. **跨 run 共享 session**:Phase 1 不支持,每 run 新 session
 6. **多 provider 同时跑**:不同 provider 用不同隔离 HOME
 
-#### 6.2.5 v0.12 修订:Per-Invocation HOME + 动态 config.toml
+#### 6.2.5 v0.12 修订:Per-Spec HOME + 动态 config.toml
 
-> **v0.12 关键修正**(用户洞察):Codex runtime 锁定一个 provider,**每次 Codex invocation 必须是独立 isolated HOME**——per-run 粒度不够。
+> **v0.12 关键修正**(用户洞察:per-invocation 走过头了,per-spec 才是正确粒度):Spec 是 AgentSpec 静态定义,**spec 创建时写 config.toml,后续 invoke 共享同一 HOME**。
 
-**问题场景**:
-- Run A stage 1 用 OpenRouter(Claude) → HOME `.codex/config.toml` `model_provider = "openrouter"`
-- Run A stage 2 想用 OpenAI(GPT-5) → **同一 HOME 的 config.toml 不行**,需要独立 HOME
+**为什么 per-spec 而不是 per-invocation**:
+- per-invocation:**每次 Codex spawn 都重写 config.toml,丢失 session 状态**
+- per-spec:**spec 创建时一次性写 config.toml,多次 invoke 共享 session 可 resume**
+- per-spec:**spec 是用户定义的复用单元,HOME 与 spec 同生命周期**
 
-**解决方案**:
-- HOME 粒度:**per-invocation**(每次 Codex spawn)
-- 配置:`config.toml` 由 Conductor **动态生成**,从 `ConductorLaunchSpec` 派生
-- auth 文件:**按 provider 软链到 `.auth/<provider>/`**
+**Spec 生命周期**:
+```bash
+# 1. 创建 spec(写 HOME + config.toml)
+conductor spec create --name claude-opus-planner \
+  --provider openrouter \
+  --model anthropic/claude-opus-4-6 \
+  --skills [...] --mcp [...]
+# → Conductor 生成 specId,创建 specs/<specId>/home/,写 config.toml
 
-**动态生成 config.toml 示例**:
+# 2. 多次 invoke 同一 spec(共享 HOME)
+conductor run --spec claude-opus-planner "task 1"
+conductor run --spec claude-opus-planner "task 2"      # 共享 session JSONL,Codex 可 resume
+conductor run --spec claude-opus-planner --resume <id> "continue"
 
-```typescript
-// per-invocation HOME + config.toml
-async function setupInvocHome(spec: ConductorLaunchSpec): Promise<IsolatedHome> {
-  const home = NewIsolatedHome({
-    provider: spec.provider,
-    runId: spec.runId,
-    stageId: spec.stageId,
-    invocationId: spec.invocationId,
-  });
-  await home.Setup();
-
-  // 动态生成 config.toml
-  const configToml = `
-model_provider = "${spec.provider}"
-
-[model_providers.${spec.provider}]
-name = "${spec.providerLabel}"
-base_url = "${spec.baseUrl}"
-env_key = "${spec.envKey}"
-`;
-  await home.WriteFile(".codex/config.toml", configToml);
-
-  // 按 provider 软链 auth
-  await home.LinkAuth(spec.provider);
-
-  return home;
-}
-```
-
-**HOME 生命周期**:
-```
-Run 启动
- ↓
-Stage 1: 创建 HOME-A,写 config.toml A,spawn codex-1
- ↓ stage 1 跑...
- ↓
-codex-1 退出 → HOME-A 保留(便于 debug + resume)
- ↓
-Stage 2: 创建 HOME-B,写 config.toml B,spawn codex-2
- ↓ stage 2 跑...
- ↓
-Run 完成
- ↓
-(可选)`conductor prune --run <id>` 清掉所有 HOME
+# 3. 不同 spec 用不同 HOME
+conductor run --spec gpt5-coder "implement auth"        # specs/gpt5-coder/home/
+conductor run --spec gemini-reviewer "review"           # specs/gemini-reviewer/home/
 ```
 
 **目录结构(v0.12 修订)**:
 
 ```
 $CONDUCTOR_HOME/
-├── .auth/                          ← 共享 auth(按 provider 分)
+├── .auth/                                  ← 共享 auth(按 provider 分)
 │   ├── openai/auth.json
 │   ├── openrouter/auth.json
 │   └── ollama/(本地无 auth)
-└── runs/<runId>/stages/<stageId>/
-    ├── home/                       ← per-invocation HOME
-    │   ├── .codex/
-    │   │   ├── config.toml         ← 动态生成
-    │   │   └── sessions/<s>.jsonl
-    │   └── .codex.json → $CONDUCTOR_HOME/.auth/<provider>/auth.json
-    └── invocation.json             ← invocation 元数据
+├── specs/                                  ← per-spec HOME
+│   ├── claude-opus-planner/                ← spec ID(用户命名或 hash)
+│   │   ├── spec.json                       ← spec 定义
+│   │   └── home/                            ← per-spec HOME
+│   │       ├── .codex/
+│   │       │   ├── config.toml             ← spec 创建时一次写
+│   │       │   └── sessions/<s>.jsonl      ← Codex session 持久化
+│   │       └── .codex.json → $CONDUCTOR_HOME/.auth/openrouter/auth.json
+│   ├── gpt5-coder/
+│   │   └── home/                            ← 不同 spec 独立 HOME
+│   └── gemini-reviewer/
+│       └── home/
+└── runs/<runId>/                           ← per-run state(不变)
+    ├── state.json
+    ├── timeline.ndjson
+    └── blobs/
+```
+
+**动态生成 config.toml 示例**(spec 创建时执行一次):
+
+```typescript
+async function createSpec(specDef: AgentSpec): Promise<SpecRecord> {
+  const specId = hashSpec(specDef);  // 或用户命名
+
+  // per-spec HOME(spec 创建时一次性建立)
+  const home = NewIsolatedHome({
+    provider: specDef.provider,
+    specId,
+  });
+  await home.Setup();
+
+  // 写 config.toml(只这一次,后续 invoke 共享)
+  await home.WriteFile(".codex/config.toml", `
+model_provider = "${specDef.provider}"
+
+[model_providers.${specDef.provider}]
+name = "${specDef.providerLabel}"
+base_url = "${specDef.baseUrl}"
+env_key = "${specDef.envKey}"
+`);
+
+  // 按 provider 软链 auth
+  await home.LinkAuth(specDef.provider);
+
+  // 保存 spec 定义(供后续 invoke 查找)
+  await storage.SaveSpec({
+    id: specId,
+    definition: specDef,
+    homePath: home.Dir,
+    createdAt: Date.now(),
+  });
+
+  return { id: specId, home };
+}
+
+async function invokeSpec(specId, prompt, signal) {
+  const spec = await storage.LoadSpec(specId);
+  const home = IsolateHome.Open(spec.homePath);  // 复用
+  const cmd = spawn("codex", ["app-server"], {
+    env: { ...process.env, HOME: home.Dir, ...spec.definition.env },
+    signal,
+  });
+  return new CodexSession(cmd, spec, signal);
+}
 ```
 
 **关键边界**:
-- 不同 invocation 之间**不共享 HOME**(因为 provider / auth / config 可能不同)
-- 同一 invocation 多次 turn **共享同一 HOME**(Codex session 复用 HOME)
-- run 内 stage 之间**不共享 HOME**(因为可能不同 provider)
-- run 之间的 HOME **互不干扰**
+- **不同 spec** → **不同 HOME**(防 provider / config 冲突)
+- **同 spec 多次 invoke** → **共享 HOME**(config.toml 一次写,session JSONL 可跨 invoke resume)
+- **同 spec 并发 invoke** → ⚠️ 共享 HOME,**config.toml 只读不冲突,session ID 唯一不冲突**,但其他 state 可能短暂 race(可加 file lock 或接受)
+- spec 创建是一次性成本,长期复用
+
+**Per-Spec vs Per-Invocation 对比**:
+
+| 维度 | per-invocation(原) | **per-spec(现)** |
+|---|---|---|
+| config.toml 写次数 | N 次 invoke | **1 次 spec 创建** |
+| Session 跨 invoke 状态 | ❌ 重启 | ✅ 可 resume |
+| 磁盘占用 | N 个 HOME | **1 个 HOME per spec** |
+| 同 spec 并发 invoke | 各自独立 | ⚠️ 共享,需注意 |
+| spec 隔离(provider 不同) | ✅ | ✅ |
+| 实现复杂度 | 中(每次写 config)| **低(spec 创建写一次)** |
+
+**`specId` 来源**:
+- 用户命名:`conductor spec create --name my-spec`(推荐,user-friendly)
+- 字段 hash:`sha256(provider|model|skills|mcp|...)`(确定性,可复现)
+- 推荐:**用户命名 + hash 校验**(用户命名优先,如果重名则追加 hash 后缀)
 
 #### 6.2.6 集成到 SubprocessClient(§17.2 D2)
 
@@ -1929,7 +1969,9 @@ DELETE /v1/runs/<runId>?force=true            # 立即
 | Phase 1 形态 | **本地优先**(local-first),单 host daemon,Paseo 模型;无 Hub | §10 |
 | Provider 策略 | **Codex only + OpenRouter 多模型**——OpenAI 维护的 app-server;`~/.codex/config.toml` 配 `[model_providers.openrouter]` 覆盖 100+ 模型 | §5 |
 | Conductor 范围 | **只在 Codex 之上加价值**:workflow engine、Hub 调度、contextBus、HOME 隔离、persistence | §5.0 |
-| Provider 配置入口 | **用户 ~/.codex/config.toml**(标准 Codex 配置),Conductor 不参与 | §5.2 |
+| Provider 配置入口 | **Conductor 动态生成**到 per-spec HOME,user 不手动配 | §5.2, §6.2.5 |
+| **Spec 模型** | **Spec 是用户定义的复用单元**;HOME 与 spec 同生命周期;同 spec 多次 invoke 共享 HOME,session 可跨 invoke resume | §6.2.5 |
+| HOME 粒度 | **Per-spec**(不是 per-run,不是 per-invocation) | §6.2.5 |
 | 多 host task 模型 | **task 不跨机器**;Hub(Phase 2+)= dispatcher,分发不同 task 给不同 host | §10.2 |
 | 跨 host session 迁移 | **彻底不做**(用户决策 v0.6) | §10.4 ~~删除~~ |
 | "无缝"边界 | **彻底不做**(用户决策 v0.6) | §10.5 ~~删除~~ |
