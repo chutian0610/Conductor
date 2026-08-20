@@ -509,6 +509,190 @@ type PlayerSelector interface {
 并行 agent 在同一 repo 上工作时必须隔离(否则 git 工作树互相覆盖)。直接复用 Paseo `server/worktree/` 的模式:每条并行 branch 自动 `git worktree add` 到 `.conductor/worktrees/<branch>`。
 Hub 调度时**优先把同 workflow 的 stage 路由到同一 host**(避免 worktree 反复 sync),只有该 host 不可用时才迁移。
 
+### 10.4 跨 Host Session 迁移(核心价值)
+
+> v0.4 关键架构决策。用户问题:"只支持一种 provider 是不是就能实现跨 host session 迁移?"
+>
+> **答案:是的——v0.4 推荐 Phase 1 只支持 Claude Code,把跨 host session 迁移做扎实;Phase 2 再加 provider。**
+
+#### 10.4.1 单 provider vs 多 provider 的迁移复杂度
+
+| 维度 | 单 provider v1 (只 Claude) | 多 provider v1 |
+|---|---|---|
+| Session 格式 | 1 个 JSONL 格式 | N 个格式 + 翻译 |
+| 迁移 payload 形态 | 一致 | 每个 provider 不一样 |
+| Resume 协议 | `--resume <session-id>` | 各家各做(app-server / ACP / CLI flag) |
+| 工作目录同步 | `git bundle` 一份 | 各 provider 各自 working state |
+| 测试矩阵 | 1×host | N×host |
+| **跨 provider session 翻译** | **不需要** | **open research problem**(SDK 也不解决) |
+
+> **结论**:Phase 1 想跑通"host A 的 Claude session 迁到 host B 接着跑",**只支持 Claude 即可**。想跑通"host A Claude → host B Codex",本质是 LLM 翻译工作,与协议无关,不是 Phase 1 该做的。
+
+#### 10.4.2 抽象先行:interface 第一天就设计,实现 v1 单 provider
+
+Go interface 零成本(无运行时开销),推荐:
+
+```
+Phase 1:
+  - AgentClient / AgentSession interface(必须)
+  - 唯一实现:ClaudeAgentClient
+  - SessionMigrator interface(必须)
+  - 唯一实现:ClaudeSessionMigrator
+
+Phase 2:
+  - 加 CodexAgentClient + CodexSessionMigrator
+  - interface 不变,只是新增实现
+  - 跨 provider 翻译仍不做(走 briefing,§12.11)
+```
+
+#### 10.4.3 Session 迁移的 5 类数据
+
+跨 host 迁移要搬走:
+
+1. **Provider 私有 session 状态**(Claude 的 `~/.claude/projects/<project>/<session-id>.jsonl`)
+2. **Working directory 内容**(worktree git state + uncommitted changes)
+3. **Workflow cursor**(§12.8 — 当前 stage + attempt)
+4. **Refs**(§12.5 — file / worktree / session handles)
+5. **Meta**(startedAt、hosts 列表、cost 等)
+
+#### 10.4.4 SessionMigrator interface
+
+```go
+// internal/migrate/migrator.go
+type SessionMigrator interface {
+    // host A:序列化 provider 私有 session 状态
+    ExportSession(ctx context.Context, sessionID string) (SessionSnapshot, error)
+    // host B:反序列化 + 恢复
+    ImportSession(ctx context.Context, snap SessionSnapshot) (string, error)
+    // Hub 决策用:能不能跨 provider
+    Capabilities() MigrationCapabilities
+}
+
+type SessionSnapshot struct {
+    Provider      string             // "claude" v1
+    FormatVersion string             // "claude-session/v1"
+    Payload       []byte             // gzip(JSONL)
+    WorkingDir    string             // host B 上需要存在
+    FilePayloads  map[string][]byte  // worktree.bundle、attached files
+    Cursor        WorkflowCursor     // §12.8
+    Refs          RefMap             // §12.5
+    Meta          map[string]any
+}
+
+type MigrationCapabilities struct {
+    CrossProvider   bool  // v1:false(只能同 provider)
+    StreamingExport bool  // 大 payload 流式
+    Incremental     bool  // 增量迁移(只搬新增)
+}
+```
+
+#### 10.4.5 Claude v1 实现要点
+
+```go
+// internal/provider/claude/migrate.go
+type ClaudeMigrator struct{ home string }  // ~/.claude
+
+func (m *ClaudeMigrator) ExportSession(ctx, sessionID) (SessionSnapshot, error) {
+    project := projectHashFor(sessionID)
+    jsonlPath := filepath.Join(m.home, "projects", project, sessionID+".jsonl")
+    payload, _ := os.ReadFile(jsonlPath)
+    cwd := extractCwd(payload)   // 从 JSONL 首行解析
+
+    files := map[string][]byte{}
+    if isGitWorktree(cwd) {
+        bundle, _ := exec.CommandContext(ctx, "git", "-C", cwd, "bundle", "create", "-", "HEAD").Output()
+        files["worktree.bundle"] = bundle
+    }
+    // uncommitted changes?
+    diff, _ := exec.CommandContext(ctx, "git", "-C", cwd, "diff", "HEAD").Output()
+    files["uncommitted.patch"] = diff
+
+    return SessionSnapshot{
+        Provider:      "claude",
+        FormatVersion: "claude-session/v1",
+        Payload:       gzip(payload),
+        WorkingDir:    cwd,
+        FilePayloads:  files,
+    }, nil
+}
+
+func (m *ClaudeMigrator) ImportSession(ctx, snap) (string, error) {
+    payload := gunzip(snap.Payload)
+    jsonlPath := filepath.Join(m.home, "projects", projectHashFor(snap.WorkingDir), snap.WorkingDir+".jsonl")
+    _ = os.WriteFile(jsonlPath, payload, 0644)
+
+    if bundle, ok := snap.FilePayloads["worktree.bundle"]; ok {
+        _ = os.MkdirAll(snap.WorkingDir, 0755)
+        _ = exec.CommandContext(ctx, "git", "-C", snap.WorkingDir, "clone", "--bare", "...", ".").Run()
+    }
+
+    // Claude CLI 后续 spawn 时会传 --resume,provider 自己恢复多轮状态
+    return snap.WorkingDir, nil
+}
+```
+
+#### 10.4.6 Hub 端迁移触发
+
+```go
+// internal/hub/migrate.go
+func (h *PlayerHub) MigrateWorkflow(wf WorkflowID, from, to PlayerID) error {
+    // 1. §14 cancel host A 上的 stage
+    h.cancelOnHost(from, wf)
+
+    // 2. 从 from 导出
+    snap, err := h.registry.Of(from).Migrator().ExportSession(ctx, wf.SessionID)
+    if err != nil { return err }
+
+    // 3. snap 传到 to(走 Hub ↔ Player WS,大 payload 用 HTTP multipart 分片)
+    if err := h.transfer(ctx, snap, from, to); err != nil { return err }
+
+    // 4. host B 导入
+    if _, err := h.registry.Of(to).Migrator().ImportSession(ctx, snap); err != nil {
+        return err
+    }
+
+    // 5. host B 续跑 workflow(读 WorkflowState.cursor)
+    return h.registry.Of(to).ResumeWorkflow(wf)
+}
+```
+
+#### 10.4.7 传输层选择
+
+- **小 payload**(< 10MB):走 Hub ↔ Player WS,JSON 序列化
+- **大 payload**(worktree bundle):HTTP multipart 上传到 Hub,Hub 转发到目标 host
+- **可选压缩**:zstd / gzip,snap 大时默认开
+- **签名**:Hub → Player 通信用 mTLS 或短期 token(§16 待定)
+
+#### 10.4.8 失败与回滚
+
+| 阶段 | 失败处理 |
+|---|---|
+| Export 失败 | 重试 3 次;失败则 run 标 `migration_failed`,workflow 不动 |
+| 传输失败 | Hub 重传;失败则 from host 继续跑(已 cancel 的 stage 由 §14 degraded 恢复) |
+| Import 失败 | 回滚 from 不可能(stage 已 cancel);run 标 `migration_failed`,用户决定 |
+| Resume 失败 | workflow 回到 `cursor` 之前的 stage 重跑 |
+
+#### 10.4.9 v1 严格单 provider 的代价
+
+**这是 Conductor 必须诚实承认的**:
+
+- v1 用户**只能用 Claude Code**
+- 想用 Codex / Pi 的 **必须等 v2**
+- 这是**功能完整性**换**架构正确性**——Phase 1 跑通跨 host 迁移比"支持 5 个 provider 但没一个能迁"价值高
+
+**Phase 2 加新 provider 时**:
+- 新 provider 需要实现 `SessionMigrator`(自己的 Export/Import)
+- `MigrationCapabilities.CrossProvider = false`(单 provider 迁移 OK,跨 provider 走 §12.11 briefing)
+- 测试矩阵自动扩展
+
+#### 10.4.10 §15 自我审视更新
+
+> **新发现的设计债务**:
+>
+> v1 单 provider 的"够用"是**架构层**够用(interface + migrator + Hub 流程),但**业务层**意味着 Conductor v1 用户只能跑 Claude。如果项目用户场景 80% 是 Claude,这个 trade-off 完全合理;如果 50% 是 Codex 用户,Phase 2 必须立刻补。
+
+
+
 ## 11. 持久化与可观测
 
 ### 11.1 持久化
@@ -970,12 +1154,13 @@ conductor ls
 
 ```
 Phase 1 (MVP):
-  - protocol/ skeleton + Zod schemas
-  - provider/ base + Claude/Codex 内置 provider
-  - runner/ 生命周期 + 事件流
-  - storage/ 文件 JSON
-  - daemon/ 入口 + pid-lock
-  - cli/ run/ls/logs/send/wait
+  - protocol/ skeleton + Go structs + JSON Schema
+  - provider/ base (SubprocessClient + ProtocolParser) + **Claude 单一实现**
+  - runner/ 生命周期 + 事件流 + context.Context 取消
+  - storage/ 文件 JSON + SQLite 一等切换
+  - daemon/ 入口 + pid-lock + WS
+  - hub/ 跨 host 注册 + **session 迁移(§10.4 必做)**
+  - cli/ run/ls/logs/send/wait/cancel + handoff
 
 Phase 2:
   - worker/ 5 种节点类型
@@ -985,7 +1170,7 @@ Phase 2:
   - cancellation/ §14 协议落地 + 跨 host e2e
 
 Phase 3:
-  - provider/ Pi/OMP/ACP-generic(扩到 5+ provider)
+  - provider/ 扩到 3+ provider(Codex、Paseo ACP 类);迁移能力按 provider 扩展
   - provider-subagents/ 跟踪 + UI(可选 web)
   - 更多编排原语(join 策略、loop 条件)
 
@@ -1232,6 +1417,9 @@ DELETE /v1/runs/<runId>?force=true            # 立即
 |---|---|---|
 | Server 语言栈 | **Go**(单 binary,Daemon/Hub/CLI 同进程;context.Context 原生支持 §14) | §0, §17 |
 | WebUI 语言栈 | **JS** (Next.js 14 App Router + React 18),Phase 1 后启动 | §3 |
+| Phase 1 provider | **单 provider**:Claude Code only(v1 不支持 Codex/Pi/ACP) | §10.4 |
+| 跨 host session 迁移 | **必须**(核心价值);通过 SessionMigrator interface + 单 provider 实现 | §10.4 |
+| Phase 2+ provider | 加新 provider 时新增实现,interface 不变;跨 provider 翻译暂不做 | §10.4, §12.11 |
 | Workflow 引擎 | **A. 自研轻量软工作流引擎**(否掉 Temporal/Restate 重方案,否掉 prompt-only 退化) | §8.6 |
 | Player registry | **多 host Hub**(进程内 + 跨 host 注册中心) | §10.2 |
 | 持久化默认 | **文件 JSON + SQLite 一等切换**(运行时可切,wire schema 不变) | §11.1 |
@@ -1651,6 +1839,35 @@ type ACPParser struct{ /* 与 Codex 同,但方法名是 ACP 规范的 */ }
 - webui 何时启动(Phase 1 同步 vs Phase 2 末 vs Phase 3)
 - CLI flag 库终选(cobra vs stdlib flag)
 - OpenAPI 生成工具(swag vs ogen vs hand-written)
+
+**v0.4 后续追加(第三轮 — 关键架构决策)**:
+
+**用户决策**:Phase 1 只支持单一 provider(Claude Code),把跨 host session 迁移做扎实
+
+**关键洞察**:Phase 1 想跑通"host A 的 Claude session 迁到 host B 接着跑",**只支持 Claude 就够**。多 provider v1 会引入"跨 provider session 翻译"——这是 open research problem,SDK 也不解决。
+
+**新增 §10.4 跨 Host Session 迁移(核心价值)**(10 小节):
+- §10.4.1 单 provider vs 多 provider 迁移复杂度对比表
+- §10.4.2 抽象先行:interface 第一天就设计,实现 v1 单 provider
+- §10.4.3 迁移的 5 类数据(session state / working dir / cursor / refs / meta)
+- §10.4.4 SessionMigrator interface(Go 代码)
+- §10.4.5 Claude v1 实现要点(读 JSONL + git bundle)
+- §10.4.6 Hub 端迁移触发流程(cancel → export → transfer → import → resume)
+- §10.4.7 传输层选择(WS vs HTTP multipart + 压缩 + 签名)
+- §10.4.8 失败与回滚表(4 个阶段)
+- §10.4.9 v1 严格单 provider 的代价(诚实承认)
+- §10.4.10 §15 自我审视更新(新设计债务)
+
+§13 路线图修订:
+- Phase 1:移除"Codex"provider,明确"Claude 单一实现";**强调 hub + session 迁移必做**
+- Phase 3:从"5+ provider"改为"3+ provider,迁移能力按 provider 扩展"
+
+§16 决策表扩展:新增 3 行(Phase 1 provider / 跨 host session 迁移 / Phase 2+ provider)
+
+**下一轮(待用户输入)**:
+- Claude session JSONL 格式版本兼容策略(`FormatVersion` 演进)
+- worktree git bundle 包含哪些 refs(只 HEAD / 含所有 branch / 含 stash?)
+- 大 payload 传输的安全边界(snap 签名 / 加密 / Hub 是否需要持久化)
 
 **v0.4 后续追加(第二轮)**:
 
