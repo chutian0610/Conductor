@@ -15,14 +15,15 @@ Conductor **不**自研 LLM agent 框架,**不**训练模型,**不**做模型路
 
 | 维度 | Paseo | Multica | Conductor (拟) |
 |---|---|---|---|
-| 形态 | 本地 daemon + 跨端 client | Go 服务 + Web/Electron/Expo + 自托管 | 本地 daemon + CLI/Web(可选) |
-| 语言栈 | TypeScript (Node) | Go (server) + TS (前端) | TypeScript (Node) — 与生态对齐 |
-| Provider 抽象 | `AgentClient` 接口 + ACP 基类 | `Runtimes` 模块 + 健康度派生 | 同 Paseo 模式,见 §5 |
-| 编排层 | prompt 模板 + provider-native subagent | `Autopilots`(定时/触发器)+ workflow DSL | Worker 图 + PDCA 引擎,见 §6 |
-| 持久化 | 文件 JSON + Zod | Postgres + sqlc | 文件 JSON(Paseo 模式),Postgres 推迟 |
-| 子 agent | `ProviderSubagentStore` 仅做跟踪,实执行交给 provider | 多 assignee + runtime binding | 同 Paseo:Store 仅跟踪,执行交给 provider |
-| 远程 | 可选 E2E relay | 服务端 + Hub | 先单 host,Hub 推迟 |
-| MCP | 是 MCP host + 允许 provider 暴露 MCP | `MCP support` 模块 | 同 Paseo |
+| 形态 | 本地 daemon + 跨端 client | Go 服务 + Web/Electron/Expo + 自托管 | Go Daemon/Hub + JS WebUI + 单 binary CLI |
+| 语言栈 | TypeScript (Node) | Go (server) + TS (前端) | **Go (server) + JS (webui)**,二进制发行 |
+| Provider 抽象 | `AgentClient` 接口 + ACP 基类 | `Runtimes` 模块 + 健康度派生 | `AgentClient` 接口 + ACP 基类 + `os/exec` subprocess,见 §5 |
+| 编排层 | prompt 模板 + provider-native subagent | `Autopilots`(定时/触发器)+ workflow DSL | Worker 图 + 软工作流引擎(§8),PDCA/GSD/自定义 |
+| 持久化 | 文件 JSON + Zod | Postgres + sqlc | 文件 JSON + SQLite 一等切换(`modernc.org/sqlite`,无 cgo),见 §11.1 |
+| 子 agent | `ProviderSubagentStore` 仅做跟踪,实执行交给 provider | 多 assignee + runtime binding | 同 Paseo,Store 仅跟踪,执行交给 provider |
+| 远程 | 可选 E2E relay | 服务端 + Hub | 多 host PlayerHub(WS + 心跳),见 §10.2 |
+| 取消原语 | AbortSignal + 手工协议 | context.Context | **`context.Context` 原生映射** §14 协议,见 §17 |
+| MCP | 是 MCP host + 允许 provider 暴露 MCP | `MCP support` 模块 | 同 Paseo,Server 可作为 MCP host |
 
 核心借鉴决策:
 - **Paseo 的 `AgentClient` + `AgentSession` 双层接口** 是 provider 抽象的最优解,直接采用。
@@ -53,32 +54,65 @@ Conductor **不**自研 LLM agent 框架,**不**训练模型,**不**做模型路
 
 ```
 conductor/
-├─ packages/
-│  ├─ protocol/         # wire 类型 + Zod schema + 消息编解码
-│  ├─ provider/         # AgentClient/AgentSession 接口 + 内置 provider 实现
-│  │  ├─ base/          #   ACPAgentClient, NativeSdkAgentClient 基类
-│  │  ├─ claude/        #   Claude Code SDK 适配
-│  │  ├─ codex/         #   Codex app-server 适配
-│  │  ├─ pi/            #   Pi RPC 适配
-│  │  ├─ omp/           #   OMP 适配(Paseo 同名)
-│  │  └─ acp-generic/   #   通用 ACP(供 copilot/cursor/kimi/kiro 等)
-│  ├─ runner/           # Agent Runner:生命周期、事件流、resume、清理
-│  ├─ worker/           # 编排图节点:DAG、sequence、parallel、switch、loop
-│  ├─ workflow/         # 工作流引擎:PDCA 周期、阶段、子任务动态生成
-│  ├─ registry/         # Player Registry:本机 agent/provider 注册表
-│  ├─ storage/          # 文件 JSON + Zod(Paseo 模式),后续可换 SQLite
-│  ├─ gateway/          # HTTP/WS 服务 + Web UI(可选)
-│  └─ cli/              # conductor run / send / ls / logs / wait / workflow
-├─ apps/
-│  ├─ daemon/           # Player Daemon 入口
-│  └─ web/              # 可选 Web UI(Phase 3+)
-├─ examples/            # 工作流样例
-├─ docs/                # 设计文档(本目录)
-├─ package.json
-└─ pnpm-workspace.yaml
+├─ server/                       # Go (单 binary 含 daemon/hub/cli)
+│  ├─ cmd/conductor/             #   main.go: subcommand dispatch
+│  │  ├─ daemon.go               #     `conductor daemon`
+│  │  ├─ hub.go                  #     `conductor hub`
+│  │  └─ cli.go                  #     `conductor run/send/ls/logs/...`
+│  ├─ internal/
+│  │  ├─ protocol/               #   wire 类型(Go structs + JSON Schema 导出)
+│  │  ├─ provider/               #   AgentClient/AgentSession 接口 + 实现
+│  │  │  ├─ base/                #     ACPAgentClient, SubprocessClient 基类
+│  │  │  ├─ claude/              #     Claude Code CLI subprocess 适配
+│  │  │  ├─ codex/               #     Codex app-server JSON-RPC 适配
+│  │  │  ├─ pi/                  #     Pi RPC 适配
+│  │  │  ├─ omp/                 #     OMP 适配
+│  │  │  └─ acpgeneric/          #     通用 ACP(供 copilot/cursor/kimi/kiro)
+│  │  ├─ runner/                 #   Agent Runner:生命周期、事件流、resume
+│  │  ├─ worker/                 #   编排图节点:single/seq/par/switch/loop
+│  │  ├─ workflow/               #   软工作流引擎(PDCA/GSD/自定义 phases)
+│  │  ├─ registry/               #   PlayerRegistry(进程内)+ PlayerHub(跨 host)
+│  │  ├─ storage/                #   JsonFileStorage + SqliteStorage(双实现)
+│  │  ├─ gateway/                #   HTTP + WS(coder/websocket)
+│  │  ├─ provider_subagents/     #   Provider-Native subagent 跟踪
+│  │  └─ acp/                    #   ACP JSON-RPC 客户端(供 provider 用)
+│  ├─ go.mod
+│  └─ Makefile
+├─ webui/                        # JS workspace(pnpm)
+│  ├─ apps/web/                  #   Next.js 14 App Router + React 18
+│  ├─ packages/
+│  │  ├─ ui/                     #     design system(基于 shadcn/ui,参考 Multica)
+│  │  ├─ api-client/             #     从 server OpenAPI 生成的 TS types + fetch
+│  │  └─ conductor-protocol/     #     protocol 的 TS types(从 JSON Schema codegen)
+│  ├─ package.json
+│  └─ pnpm-workspace.yaml
+├─ shared/                       # protocol 单一来源
+│  └─ protocol/                  #   JSON Schema(Go + TS 都从这里 codegen)
+├─ examples/                     # 工作流样例(.json + Go example code)
+├─ docs/                         # 设计文档(本目录)
+└─ README.md
 ```
 
-> 借鉴 Paseo 的 npm workspace 模式,因为 provider SDK 全部是 npm 生态。
+**子命令形态**(Go 单 binary):
+```bash
+conductor daemon                  # 启动 Player Daemon(默认前台)
+conductor daemon --hub            # 启动 Player Hub(跨 host 注册中心)
+conductor run claude "implement auth"     # CLI:通过 daemon 起 agent
+conductor ls                       # CLI:列本地 agents
+conductor cancel <runId>          # CLI:取消(对应 §14)
+conductor workflow ./my.json     # CLI:启动工作流
+```
+
+**为何 Go 单 binary**:
+- 一份发行,无 Node 版本/依赖陷阱
+- `conductor daemon|hub|cli` 同进程共用 protocol/runner/storage 代码
+- webui 完全独立部署(可以独立 npm install + build)
+
+**为何 protocol 用 JSON Schema 共享**:
+- Go:用 `invopop/jsonschema` 注解 struct,导出 schema(Phase 1);或反向从 schema 生成 struct
+- TS:`json-schema-to-typescript` 从 schema 生成 types
+- Phase 1 简化:hand-written Go structs + hand-written Zod schemas,CI 断言 wire format 一致
+- Phase 2:引入 codegen 流水线
 
 ## 4. Agent Spec — 一个 agent 的全部静态定义
 
@@ -119,47 +153,51 @@ type AgentSpec = {
 
 ## 5. Agent Provider 层
 
-### 5.1 抽象接口(对照 Paseo `agent-sdk-types.ts`)
+### 5.1 抽象接口(Go 版)
 
-```ts
-// === Provider 抽象 ===
-interface AgentClient {
-  readonly provider: AgentProvider;
-  readonly capabilities: AgentCapabilityFlags;
+```go
+// internal/protocol/provider.go —— 跨 provider 抽象
 
-  createSession(
-    config: AgentSessionConfig,
-    launchContext?: AgentLaunchContext,
-    options?: AgentCreateSessionOptions,
-  ): Promise<AgentSession>;
+type AgentProvider string   // "claude" | "codex" | "pi" | "omp" | "acp:<vendor>" | "custom:<id>"
 
-  resumeSession(
-    handle: AgentPersistenceHandle,
-    overrides?: Partial<AgentSessionConfig>,
-    launchContext?: AgentLaunchContext,
-  ): Promise<AgentSession>;
+type AgentClient interface {
+    Provider() AgentProvider
+    Capabilities() AgentCapabilityFlags
 
-  fetchCatalog(options: FetchCatalogOptions): Promise<ProviderCatalog>;
-  isAvailable(): Promise<boolean>;
+    CreateSession(ctx context.Context, cfg AgentSessionConfig,
+        launch *AgentLaunchContext, opts *AgentCreateSessionOptions) (AgentSession, error)
+    ResumeSession(ctx context.Context, handle AgentPersistenceHandle,
+        overrides *AgentSessionConfig, launch *AgentLaunchContext) (AgentSession, error)
+    FetchCatalog(ctx context.Context, opts FetchCatalogOptions) (ProviderCatalog, error)
+    IsAvailable(ctx context.Context) (bool, error)
 
-  // 可选:发现可导入的历史会话
-  listImportableSessions?: (...) => Promise<ImportableProviderSession[]>;
-  importSession?: (...) => Promise<ImportedProviderSession>;
+    // 可选:导入历史会话
+    ListImportableSessions(ctx context.Context, opts *ListImportableSessionsOptions) ([]ImportableProviderSession, error)
+    ImportSession(ctx context.Context, input ImportProviderSessionInput,
+        ctx2 ImportProviderSessionContext) (ImportedProviderSession, error)
 }
 
-interface AgentSession {
-  readonly id: string;
-  readonly provider: AgentProvider;
-  send(prompt: AgentPrompt, options?: SendOptions): Promise<AgentTurnResult>;
-  stream(): AsyncIterable<AgentStreamEvent>;
-  cancel(): Promise<void>;
-  rewind(options?: RewindOptions): Promise<void>;
-  persist(): Promise<AgentPersistenceHandle>;
-  close(): Promise<void>;
+type AgentSession interface {
+    ID() string
+    Provider() AgentProvider
+    // 同步发送(单轮)
+    Send(ctx context.Context, prompt AgentPrompt, opts *SendOptions) (AgentTurnResult, error)
+    // 流式订阅(多轮 event channel)
+    Events() <-chan AgentStreamEvent
+    // 取消当前 turn(对应 §14)
+    Cancel(ctx context.Context) error
+    // 回滚上一轮
+    Rewind(ctx context.Context, opts *RewindOptions) error
+    // 持久化句柄(崩溃后 resume)
+    Persist(ctx context.Context) (AgentPersistenceHandle, error)
+    // 关闭(必须清理 subprocess)
+    Close(ctx context.Context) error
 }
 ```
 
-> 这是 Paseo 已经验证过的契约,我们直接采用。
+> 这是 Paseo `AgentClient` + `AgentSession` 双层契约的 Go 直译。`context.Context` 一等公民贯穿所有 API——这是 Go 版本相对 TS 的**核心收益**:`ctx.Done()` 就是 §14 的取消信号源。
+>
+> `Events() <-chan AgentStreamEvent` 取代 TS 的 `AsyncIterable`——消费端 `for ev := range sess.Events() { ... }` 配合 `select { case <-ctx.Done(): ... }` 处理取消。
 
 ### 5.2 Provider 实现分类(三种接入策略)
 
@@ -196,10 +234,11 @@ const registry = buildProviderRegistry({
 
 职责单一:**管好一个 AgentSession 的生命周期**。
 
-- 进程所有权:谁 `spawn` 谁负责清理。**绝对不要**把 spawned process 留在 readiness promise 里。Paseo `providers.md` 明确警告过这条。
-- 事件流:把 SDK 的事件归一为 `AgentStreamEvent`(text/tool_call/permission/subagent/finish/error)。
-- 持久化:每次 `persist()` 返回 `AgentPersistenceHandle`,崩溃后可 `resumeSession(handle)`。
-- 上下文边界:`AgentRunner` 只持有自己的 timeline;跨 runner 的上下文通过 Worker 编排层显式传参,不共享内存。
+- 进程所有权:谁 `spawn` 谁负责清理。**绝对不要**把 spawned process 留在 readiness 里——Paseo `providers.md` 明确警告过这条。Go 实现里用 `cmd.Process.Kill()` + `defer cmd.Wait()` 保证清理。
+- 事件流:把 subprocess / SDK 的事件归一为 `AgentStreamEvent`(text/tool_call/permission/subagent/finish/error)。消费端用 `for ev := range runner.Events()`。
+- 持久化:每次 `Persist()` 返回 `AgentPersistenceHandle`,崩溃后可 `client.ResumeSession(ctx, handle, ...)`。
+- **取消语义**:`runner.Cancel(ctx)` 内部调用 `session.Cancel(ctx)`(底层 SIGTERM → grace → SIGKILL),详见 §14。
+- **上下文边界**:`AgentRunner` 只持有自己的 timeline;跨 runner 的上下文通过 Worker 编排层显式传参,不共享内存。
 
 ### 6.1 Provider-Native Subagent 跟踪(只读)
 
@@ -390,6 +429,12 @@ interface WorkflowSpec {
 
 **默认推荐 A**(轻量 + 文件持久化),为未来切换到 B 留接口。
 
+**Go 实现要点**(并发原语):
+- parallel stage 用 `golang.org/x/sync/errgroup`,`g, ctx := errgroup.WithContext(parentCtx)`,`g.Go(func() error { ... })`。
+- `errgroup` 自带取消传播——任何一个 stage 失败,其他 stage 的 ctx 自动 Done。
+- loop 用 `for { ... if until { break } }`,`until` 表达式求值从 `ctx.Prev()` 取数据。
+- 所有 stage 函数签名:`func(ctx context.Context, s StageContext) (Result, error)`——`ctx` 是取消入口,`s` 是业务上下文。
+
 ## 9. Agent Gateway 层
 
 入口层,接受外部输入并唤起 workflow。
@@ -417,36 +462,44 @@ v0.2 决策:**registry 是多 host Hub 形态**——单 host 上的 daemon 仍�
 
 ### 10.2 Registry — 进程内 + Hub
 
-**每 host 内部**:`PlayerRegistry` 是进程内 map,与 §10.1 同。
+**每 host 内部**:`PlayerRegistry` 是进程内 map,Go 实现见下。
 
-**跨 host**:Hub 是一个独立服务(也是 Conductor 的一个 daemon),维护所有 Player 的注册:
+**跨 host**:Hub 是 Conductor 的另一个 daemon,维护所有 Player 的注册:
 
-```ts
-class PlayerRegistry {                     // 进程内
-  agents: Map<AgentId, AgentRunner>;
-  providers: Map<ProviderId, AgentClient>;
-  workflows: Map<WorkflowId, WorkflowInstance>;
-  worktrees: Map<WorktreeId, WorktreeHandle>;
-
-  heartbeat(): Promise<HealthSnapshot>;   // Hub 来取
-  prune(): Promise<void>;
+```go
+// internal/registry/player.go —— 进程内注册表
+type PlayerRegistry struct {
+    mu        sync.RWMutex
+    agents    map[AgentID]*AgentRunner
+    providers map[ProviderID]AgentClient
+    workflows map[WorkflowID]*WorkflowInstance
+    worktrees map[WorktreeID]*WorktreeHandle
 }
 
-class PlayerHub {                          // 跨 host 注册中心
-  players: Map<PlayerId, PlayerEndpoint>; // PlayerId = host + daemon-instance-id
-  workflows: Map<WorkflowId, WorkflowHandle>;
-  
-  register(player: PlayerEndpoint): void;
-  heartbeat(player: PlayerId, snap: HealthSnapshot): void;
-  routeWorkflow(wf: WorkflowHandle, target: PlayerSelector): PlayerEndpoint;
-  migrateWorkflow(wf: WorkflowId, from: PlayerId, to: PlayerId): void;
+func (r *PlayerRegistry) RegisterAgent(a *AgentRunner) { ... }
+func (r *PlayerRegistry) Heartbeat() HealthSnapshot { ... }
+func (r *PlayerRegistry) Prune(ctx context.Context) error { ... }
+
+// internal/hub/hub.go —— 跨 host 注册中心
+type PlayerHub struct {
+    players   map[PlayerID]*PlayerEndpoint
+    workflows map[WorkflowID]*WorkflowHandle
+    router    *Router  // 选 host 路由策略
 }
 
-type PlayerSelector =
-  | { kind: "any" }                              // 任意健康 host
-  | { kind: "by-tag"; tags: string[] }           // host tag(架构、GPU、地域)
-  | { kind: "by-provider"; provider: string }     // 必须有某 provider
-  | { kind: "by-pinned"; playerId: PlayerId };   // 钉死某 host
+func (h *PlayerHub) Register(p *PlayerEndpoint) error { ... }
+func (h *PlayerHub) Heartbeat(p PlayerID, snap HealthSnapshot) error { ... }
+func (h *PlayerHub) RouteWorkflow(wf WorkflowHandle, sel PlayerSelector) (*PlayerEndpoint, error) { ... }
+func (h *PlayerHub) MigrateWorkflow(wf WorkflowID, from, to PlayerID) error { ... }
+
+type PlayerSelector interface {
+    Select(players []*PlayerEndpoint) (*PlayerEndpoint, error)
+}
+// 实现:
+//   AnySelector{}           // 任意健康 host
+//   TagSelector{Tags:...}   // host tag(架构、GPU、地域)
+//   ProviderSelector{Name}  // 必须有某 provider
+//   PinnedSelector{Player}  // 钉死某 host
 ```
 
 > Hub 与 Player 间是 WS 长连接 + 心跳;Player 离线后 Hub 把 run 迁到其他健康 host(§11.6 恢复)。
@@ -460,41 +513,53 @@ Hub 调度时**优先把同 workflow 的 stage 路由到同一 host**(避免 wor
 
 ### 11.1 持久化
 
-v0.2 决策:**默认 JSON + SQLite 一等切换**(不是"以后再说")。
+v0.2 决策:**默认 JSON + SQLite 一等切换**(Go 实现)。
 
-**Storage Interface**(两个后端实现同一接口):
+**Storage Interface**(Go):
 
-```ts
-interface Storage {
-  // 原子写入
-  putWorkflow(state: WorkflowState): Promise<void>;
-  getWorkflow(runId: string): Promise<WorkflowState | null>;
-  listWorkflows(filter?: WorkflowFilter): AsyncIterable<WorkflowState>;
-  
-  putAgent(spec: AgentSpec, instance: AgentInstance): Promise<void>;
-  getAgent(id: string): Promise<{spec, instance} | null>;
-  
-  appendTimeline(agentId: string, item: TimelineItem): Promise<void>;  // 永远 append-only
-  readTimeline(agentId: string, opts: TimelineQuery): AsyncIterable<TimelineItem>;
-  
-  // Blobs(大对象 offload)
-  putBlob(sha256: string, stream: ReadableStream): Promise<{bytes: number}>;
-  getBlob(sha256: string): Promise<ReadableStream | null>;
-  
-  // 索引
-  queryWorkflows(filter: WorkflowFilter): Promise<WorkflowSummary[]>;
+```go
+// internal/storage/storage.go
+type Storage interface {
+    // 原子写入
+    PutWorkflow(ctx context.Context, state WorkflowState) error
+    GetWorkflow(ctx context.Context, runID string) (*WorkflowState, error)
+    ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowSummary, error)
+
+    PutAgent(ctx context.Context, spec AgentSpec, instance AgentInstance) error
+    GetAgent(ctx context.Context, id string) (*AgentRecord, error)
+
+    // timeline 永远 append-only
+    AppendTimeline(ctx context.Context, agentID string, item TimelineItem) error
+    ReadTimeline(ctx context.Context, agentID string, q TimelineQuery) (<-chan TimelineItem, error)
+
+    // Blobs(大对象 offload)
+    PutBlob(ctx context.Context, sha256 string, r io.Reader) (int64, error)
+    GetBlob(ctx context.Context, sha256 string) (io.ReadCloser, error)
+}
+
+type WorkflowFilter struct {
+    Status   []string
+    Since    *time.Time
+    Limit    int
+    // ...
 }
 ```
 
-**两个实现**:
-- `JsonFileStorage` (Phase 1 默认):`$CONDUCTOR_HOME` 下分目录,workflow 存 `runs/<id>/state.json`,timeline 用 append-only NDJSON,blob 走文件系统。
-- `SqliteStorage` (Phase 1 同步实现,运行时切换):better-sqlite3 单文件,schema 与 JSON 等价,通过 STORAGE_BACKEND 环境变量切换,运行期不混用。
+**两个实现**(同一接口):
+- **`JsonFileStorage`** (Phase 1 默认):`$CONDUCTOR_HOME` 下分目录,workflow 存 `runs/<id>/state.json`,timeline 用 append-only NDJSON,blob 走文件系统。
+- **`SqliteStorage`** (Phase 1 同步实现):`modernc.org/sqlite`(纯 Go,无 cgo);schema 与 JSON 等价。
+
+**运行时切换**:
+```bash
+CONDUCTOR_STORAGE=json  # 默认
+CONDUCTOR_STORAGE=sqlite # 切 SQLite(同一文件:$CONDUCTOR_HOME/conductor.db)
+```
 
 切换时机:数据量到 10k+ runs 或并发写多 stage 时切 SQLite;小规模调试用 JSON(更易人肉读)。
 
 ### 11.1.1 wire schema 不变
 
-两个 backend 共享同一个 Zod schema;JSON 是直接序列化,SQLite 是 schema-as-table。读路径必须返回同一类型(由 Zod 在边界校验),业务代码无感。
+两个 backend 共享同一个 Go struct + JSON Schema;JSON 是直接序列化,SQLite 是 schema-as-table。读路径必须返回同一类型(由 struct tags 在边界校验),业务代码无感。
 
 ### 11.2 可观测
 
@@ -638,17 +703,29 @@ Return a JSON matching this schema: <Zod schema as JSON Schema>
 
 ### 12.8 持久化与恢复
 
-```ts
-interface WorkflowState {
-  runId: string;
-  workflow: string;
-  spec: WorkflowSpec;             // 描述(可热重载新版,旧实例走旧 spec)
-  inputs: RunInputs;
-  stages: Record<string, StageOutput>;  // 只存 inline 部分
-  refs: RefIndex;                 // 所有 ref 的位置表
-  cursor: { stage: string; attempt: number };
-  meta: { startedAt, hosts: [...], totalCost };
-  schemaVersion: number;          // 迁移用
+```go
+type WorkflowState struct {
+    RunID         string                     `json:"runId"`
+    Workflow      string                     `json:"workflow"`
+    Spec          WorkflowSpec               `json:"spec"`            // 描述(可热重载新版)
+    Inputs        RunInputs                  `json:"inputs"`
+    Stages        map[string]StageOutput     `json:"stages"`          // 只存 inline 部分
+    Refs          RefIndex                   `json:"refs"`
+    Cursor        Cursor                     `json:"cursor"`
+    Meta          WorkflowMeta               `json:"meta"`
+    SchemaVersion int                        `json:"schemaVersion"`  // 迁移用
+}
+
+type Cursor struct {
+    Stage   string `json:"stage"`
+    Attempt int    `json:"attempt"`
+}
+
+type WorkflowMeta struct {
+    StartedAt    time.Time         `json:"startedAt"`
+    Hosts        []string          `json:"hosts"`
+    TotalCost    CostBreakdown     `json:"totalCost"`
+    SchemaFields map[string]any    `json:"schemaFields,omitempty"`
 }
 ```
 
@@ -820,26 +897,79 @@ active → cancelling → cancelled
 | `cancelled` | stage 已 ack,状态落盘 | 终态 |
 | `cancel_failed` | 超时未 ack,force-kill | 终态 |
 
-### 14.4 信号与超时
+### 14.4 信号与超时(Go 实现)
 
-```ts
-interface CancelOptions {
-  reason: "user" | "hub" | "workflow-gate" | "retry-exhausted"
-        | "loop-maxiter" | "dependency-failed" | "quota-exceeded";
-  timeoutMs: number;       // 默认 30000(grace period)
-  force: boolean;          // true → 立即 SIGKILL,跳过 grace
+```go
+type CancelReason string
+
+const (
+    CancelUser            CancelReason = "user"
+    CancelHub             CancelReason = "hub"
+    CancelWorkflowGate    CancelReason = "workflow-gate"
+    CancelRetryExhausted  CancelReason = "retry-exhausted"
+    CancelLoopMaxIter     CancelReason = "loop-maxiter"
+    CancelDependencyFail  CancelReason = "dependency-failed"
+    CancelQuotaExceeded   CancelReason = "quota-exceeded"
+)
+
+type CancelOptions struct {
+    Reason    CancelReason
+    TimeoutMs int        // 默认 30000(grace period)
+    Force     bool       // true → 立即 SIGKILL,跳过 grace
 }
 
-interface CancelResult {
-  status: "cancelled" | "cancel_failed";
-  cancelledAt: string;
-  reason: CancelOptions["reason"];
-  providerState: "resumable" | "lost";  // 取决于 provider 是否保留 persistence handle
-  forcedKill: boolean;
+type CancelResult struct {
+    Status        CancelStatus
+    CancelledAt   time.Time
+    Reason        CancelReason
+    ProviderState ProviderResumeState  // "resumable" | "lost"
+    ForcedKill    bool
 }
 ```
 
-`StageContext.signal` 是**单一取消入口**——三路信号合流。Stage 函数应监听 `signal` 并尽快返回。
+**关键 Go 设计:`StageContext` 持有 `context.Context`**:
+
+```go
+type StageContext struct {
+    Run    RunIdentity
+    Self   WorkflowStage
+    Prev   map[string]StageOutput   // 历史阶段输出(只读)
+    Refs   RefMap
+    Ctx    context.Context           // ← 取消入口(§14.4.1)
+    Emit   func(StreamEvent)
+    Store  func(key string, val any) error
+}
+```
+
+#### 14.4.1 `context.Context` 是取消的 Go-native 答案
+
+Go 的 `context.Context` 是为分布式取消设计的,完美映射 §14 协议:
+
+- **三路合流**:把 `userCtx`(用户 cancel)、`hubCtx`(Hub cancel)、`stageCtx`(workflow gate/timeout/loop-maxIter)用 `context.WithCancel(parentCtx)` 派生——任一 cancel 触发,派生 ctx 自动 Done
+- **取消传播**:Stage 函数签名 `func(ctx context.Context, s StageContext) (Result, error)` 中 `ctx.Done()` 就是 §14 的 `signal`
+- **超时**:`context.WithTimeout(ctx, 30*time.Second)` 直接实现 `timeoutMs`
+- **跨 host**:Hub 给远端发 cancel 消息后,**也调用对端 daemon 的 `ctx.Cancel()`**,语义一致
+
+```go
+// workflow engine 里 composite cancel context
+parentCtx := mergeContexts(userCtx, hubCtx)   // 任一 Done → parent Done
+stageCtx, cancel := context.WithTimeout(parentCtx, time.Duration(opts.TimeoutMs)*time.Millisecond)
+defer cancel()
+
+// stage function 应这样写:
+func myStage(ctx context.Context, s StageContext) (Result, error) {
+    for {
+        select {
+        case <-ctx.Done():
+            return Result{}, ctx.Err()   // cancellation/timeout/deadline 都走这里
+        case ev := <-someChannel:
+            // 处理
+        }
+    }
+}
+```
+
+> **收益**:`StageContext` 不需要单独的 `signal: AbortSignal` 字段——Go 里 `ctx` 就是 signal。所有 §14 协议字段(`reason / timeoutMs / force`)只作为**元数据**传给 cancel handler,实际机制是 ctx propagation。
 
 ### 14.5 Provider 取消语义
 
@@ -861,17 +991,39 @@ Stage 收到 cancel 后:
 
 ### 14.6 取消传播策略
 
-```ts
-type CancelPolicy =
-  | { kind: "fail-fast" }                              // 取消兄弟 stage(parallel 默认)
-  | { kind: "continue-siblings" }                       // 兄弟继续跑(sequence 默认)
-  | { kind: "drain"; timeoutMs: number };              // 给兄弟 timeoutMs 收尾,然后取消
+```go
+type CancelPolicy interface{ apply(...) }   // 或直接 type + switch
+
+// fail-fast:取消兄弟 stage(parallel 默认)
+type CancelPolicyFailFast struct{}
+// continue-siblings:兄弟继续跑(sequence 默认)
+type CancelPolicyContinueSiblings struct{}
+// drain:给兄弟 timeoutMs 收尾,然后取消
+type CancelPolicyDrain struct{ TimeoutMs int }
+```
+
+Worker 编排层用 `errgroup.WithContext` 实现 fail-fast:
+```go
+g, gCtx := errgroup.WithContext(stageCtx)
+for _, branch := range parallelBranches {
+    branch := branch
+    g.Go(func() error {
+        return runBranch(gCtx, branch)  // 任一 branch err,gCtx.Done()
+    })
+}
+return g.Wait()   // 等所有 branch,gCtx 取消时正在跑的也尽快返回
 ```
 
 ### 14.7 幂等性
 
-Stage 需要 `idempotencyKey`:
-- `idempotencyKey = "${runId}:${stageName}:${attempt}"`
+Stage 需要 `idempotencyKey`(Go 风格):
+```go
+// "runID:stageName:attempt"  → sha256 截前 16 hex
+func IdempotencyKey(runID, stageName string, attempt int) string {
+    h := sha256.Sum256([]byte(fmt.Sprintf("%s:%s:%d", runID, stageName, attempt)))
+    return hex.EncodeToString(h[:8])
+}
+```
 - 副作用(git commit、worktree、PR 创建)必须先 check key 再执行
 - Ref 用 sha256 命名天然幂等
 
@@ -931,16 +1083,19 @@ DELETE /v1/runs/<runId>?force=true            # 立即
 
 10. **不与 LLM 直接耦合** —— 这是 Conductor 的定位选择,但也意味着"用一个 LLM 当 planner 来动态生成图节点"的能力被限定在 Worker 层之上。如果未来需要"LLM 在线重规划图结构",引擎层必须支持热替换 NodeRef,**当前未实现**。
 
-## 16. 已确认的关键决策(v0.3)
+## 16. 已确认的关键决策(v0.4)
 
 | 决策点 | 选定方案 | 章节 |
 |---|---|---|
+| Server 语言栈 | **Go**(单 binary,Daemon/Hub/CLI 同进程;context.Context 原生支持 §14) | §0, §17 |
+| WebUI 语言栈 | **JS** (Next.js 14 App Router + React 18),Phase 1 后启动 | §3 |
 | Workflow 引擎 | **A. 自研轻量软工作流引擎**(否掉 Temporal/Restate 重方案,否掉 prompt-only 退化) | §8.6 |
 | Player registry | **多 host Hub**(进程内 + 跨 host 注册中心) | §10.2 |
 | 持久化默认 | **文件 JSON + SQLite 一等切换**(运行时可切,wire schema 不变) | §11.1 |
 | 跨 provider 子 agent | **不做**,agent 间对等(peer) | §6.1 |
 | Provider 内部 subagent | **不干预**,纯观测 | §6.1 |
 | Context 跨步骤 | **强类型 StageSpec + Ref offload + Zod 校验** | §12 |
+| Protocol 共享 | **JSON Schema 单一来源**,Go structs + Zod 双写 + CI 等价断言(Phase 1);codegen(Phase 2) | §17.2 D7 |
 | 长上下文策略 | **4 层分层**:Ref / 声明式 reads / agent retrieve / provider 摘要 | §12.10 |
 | Workflow 阶段 | **软工作流 + 语义标签**:PDCA(Plan→Do→Check→**Apply**)是默认预设,非强制;可扩展 GSD、自定义 phases | §8 |
 | 取消协议 | **三路合一**:Hub / 用户 / workflow 自身 → 同一 signal,三阶段生命周期 | §14 |
@@ -953,6 +1108,203 @@ DELETE /v1/runs/<runId>?force=true            # 立即
 - Provider hook `onContextPressure` 的具体 contract(provider SDK 不统一,需要适配层)
 
 ---
+
+## 17. Go 实现的特定设计考量
+
+> v0.4 新增。Server 切换为 Go 后,有几个原生收益与代价值得展开。
+
+### 17.1 原生收益
+
+| 维度 | Go 实现 | 若用 TS 实现 |
+|---|---|---|
+| 取消传播 | `context.Context` 一等公民,§14 直接映射 | AbortSignal + 手工协议 |
+| 并发原语 | `errgroup` 一行实现 parallel stage + 取消传播 | Promise.allSettled + 手工 race condition 处理 |
+| subprocess 管理 | `os/exec` + `cmd.Process.Kill()` + `defer cmd.Wait()` | child_process + 手工 cleanup hooks |
+| 持久化 | `modernc.org/sqlite`(纯 Go,无 cgo)+ sqlc | better-sqlite3 + Kysely/Prisma |
+| 部署 | 单 binary 静态链接(~30MB),无 runtime | Node binary + node_modules + 版本管理 |
+| 内存/启动 | daemon 启动 < 100ms,常驻 50-80MB | Node 启动 200-500ms,常驻 100-150MB |
+| 类型安全 | 编译期 + `go vet` + 静态分析 | TS 编译期 + ESLint,运行时仍可能逃逸 |
+
+### 17.2 关键 Go 设计决策
+
+**D1. `context.Context` 是一等公民,贯穿所有 API**
+
+§14 已多次强调。`AgentClient`、`AgentSession`、`Stage.Run`、`WorkflowSpec.planner` 全部接收 `ctx context.Context`。这消除了"单独 signal 字段"的复杂性。
+
+**D2. Subprocess 生命周期 = `*exec.Cmd` 包装**
+
+```go
+type SubprocessClient struct {
+    cmd     *exec.Cmd
+    cancel  context.CancelFunc
+    stdin   io.WriteCloser
+    stdout  io.ReadCloser
+    events  chan AgentStreamEvent
+}
+
+func NewSubprocessClient(ctx context.Context, name string, args []string) (*SubprocessClient, error) {
+    cmd := exec.CommandContext(ctx, name, args...)
+    stdin, _ := cmd.StdinPipe()
+    stdout, _ := cmd.StdoutPipe()
+    if err := cmd.Start(); err != nil { return nil, err }
+
+    cli := &SubprocessClient{
+        cmd:    cmd,
+        stdin:  stdin,
+        stdout: stdout,
+        events: make(chan AgentStreamEvent, 64),
+    }
+    go cli.pumpEvents(stdout)   // JSON-RPC / NDJSON → events channel
+    return cli, nil
+}
+
+func (c *SubprocessClient) Close(ctx context.Context) error {
+    close(c.events)
+    if err := c.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+        c.cmd.Process.Kill()
+    }
+    return c.cmd.Wait()
+}
+```
+
+> **关键**:`exec.CommandContext(ctx, ...)` 自动绑 ctx——ctx cancel 时 subprocess 自动 SIGKILL。这是 Paseo `providers.md` 警告"不要把 spawned process 留在 readiness promise 里"的 Go-native 解。
+
+**D3. 进程所有权 = 谁 `Start` 谁 `Wait`/`Kill`**
+
+每次 `cmd.Start()` 必须配 `defer cmd.Wait()` + cancel handler。Runner 在 cleanup 路径保证 subprocess 不留孤儿。
+
+**D4. WS 用 `nhooyr.io/websocket`(现 `github.com/coder/websocket`)**
+
+- 比 `gorilla/websocket` API 更现代
+- 内置 `context.Context` 支持(`ws.Read(ctx)`)
+- 跨平台一致(`runtime` 抽象好)
+- 单文件,零依赖
+
+**D5. Schema 验证用 struct tags + `go-playground/validator/v10`**
+
+```go
+type AgentSpec struct {
+    Provider  string `json:"provider" validate:"required,oneof=claude codex pi omp"`
+    Model     string `json:"model"    validate:"omitempty"`
+    Cwd       string `json:"cwd"      validate:"required,dir"`
+    Skills    []string `json:"skills" validate:"dive,required"`
+    // ...
+}
+
+func (s *AgentSpec) Validate() error {
+    return validator.New().Struct(s)
+}
+```
+
+> Zod 风格的运行时校验在 Go 里就是 `validator/v10`。Phase 1 够用,Phase 2 可升级到基于 JSON Schema 的 codegen。
+
+**D6. CLI 单 binary + 子命令**
+
+```go
+// cmd/conductor/main.go
+func main() {
+    if len(os.Args) < 2 {
+        runDaemon(os.Args[1:])
+        return
+    }
+    switch os.Args[1] {
+    case "daemon":   runDaemon(os.Args[2:])
+    case "hub":      runHub(os.Args[2:])
+    case "run":      cliRun(os.Args[2:])
+    case "ls":       cliLs(os.Args[2:])
+    case "logs":     cliLogs(os.Args[2:])
+    case "cancel":   cliCancel(os.Args[2:])
+    case "workflow": cliWorkflow(os.Args[2:])
+    default:         runDaemon(os.Args[1:])   // backward-compat
+    }
+}
+```
+
+`conductor` 不带参数 = 默认启动 daemon(便于开机自启)。
+
+**D7. 协议共享:JSON Schema source of truth + 双向 codegen**
+
+```bash
+# shared/protocol/*.schema.json → 单一来源
+shared/protocol/agent-spec.schema.json     # AgentSpec shape
+shared/protocol/events.schema.json         # AgentStreamEvent enum
+shared/protocol/workflow.schema.json       # WorkflowSpec shape
+
+# Go 端(从 schema 生成或 hand-write)
+#   server/internal/protocol/types.go     # struct + json tags + validate tags
+#   server/internal/protocol/schema.go   # 导出 schema(可选)
+
+# TS 端(从 schema 生成)
+#   webui/packages/conductor-protocol/index.ts   # 生成的 types
+#   webui/packages/conductor-protocol/runtime.ts # Zod-style 校验(可选)
+```
+
+Phase 1 简化:**hand-written Go structs + hand-written Zod schemas,CI 断言 wire JSON 序列化等价**。Phase 2 引入 codegen。
+
+**D8. Hub ↔ Player 长连接 = gorilla/websocket 或 coder/websocket**
+
+```go
+// hub-side
+conn, _, err := websocket.Dial(ctx, player.URL, nil)
+defer conn.Close(websocket.StatusNormalClosure, "bye")
+
+// 每 5s 发心跳
+ticker := time.NewTicker(5 * time.Second)
+for {
+    select {
+    case <-ctx.Done(): return
+    case <-ticker.C:
+        conn.Write(ctx, websocket.MessageText, []byte(`{"type":"heartbeat"}`))
+    }
+}
+```
+
+### 17.3 关键 Go 库选型
+
+| 用途 | 推荐 | 备选 |
+|---|---|---|
+| HTTP 路由 | `net/http` Go 1.22+ ServeMux | `go-chi/chi` |
+| WebSocket | `github.com/coder/websocket` | `gorilla/websocket` |
+| SQLite | `modernc.org/sqlite`(纯 Go) | `mattn/go-sqlite3`(cgo) |
+| SQL codegen | `sqlc` | 手写 sqlx |
+| 并发 | `golang.org/x/sync/errgroup` | 手写 WaitGroup |
+| 校验 | `go-playground/validator/v10` | ozzo-validation |
+| 日志 | `log/slog`(stdlib,Go 1.21+) | `uber-go/zap` |
+| Config | `spf13/viper` 或手写 env | koanf |
+| CLI flags | `spf13/cobra` | stdlib `flag` |
+| Testing | stdlib `testing` + `github.com/stretchr/testify` | gocheck |
+| Mocks | `uber-go/mock`(gomock 后续) | 手写 stub |
+| JSON Schema export | `invopop/jsonschema` | 手维护 |
+
+### 17.4 部署与发行
+
+- **单 binary 静态链接**:`CGO_ENABLED=0 go build -ldflags="-s -w" -o conductor`
+- **跨平台**:linux/amd64、linux/arm64、darwin/arm64(Apple Silicon)、windows/amd64
+- **homebrew tap**(可选):`brew install conductor/tap/conductor`
+- **systemd / launchd unit**(可选):`conductor daemon` 开机自启
+- **Docker**(可选):scratch 镜像,binary 拷贝进去,~30MB
+
+### 17.5 测试策略(Go 特定)
+
+- **单元测试**:`go test ./internal/...` + testify
+- **Provider subprocess mock**:`mock_load_test_agent`(Paseo 同款,Go 版)
+- **真实 provider e2e**:`_test.go` 文件名带 `.real.e2e.`(Paseo 约定,只在 CI 跑需要真 binary 的测试)
+- **Hub e2e**:多 process 模拟多 host,用 `t.Helper()` + `t.TempDir()` 隔离
+- **Race 检测**:`go test -race ./...` 是 CI 必跑
+- **Coverage**:`go test -coverprofile=cover.out`,门槛 80%+
+
+### 17.6 webui ↔ server 协议边界
+
+Server 暴露 OpenAPI 3.1 规范;webui 用 `openapi-typescript` codegen:
+
+```
+server/internal/gateway/openapi.yaml     # 生成的 OpenAPI 规范
+webui/packages/api-client/               # openapi-typescript 产物
+   src/types.ts                          # 全自动生成
+   src/client.ts                         # 手写 fetch wrapper
+```
+
+WS 消息 schema 单独维护:`shared/protocol/events.schema.json`。
 
 ## 附录 B:已读的竞品源文件清单(供追溯)
 
@@ -973,6 +1325,44 @@ DELETE /v1/runs/<runId>?force=true            # 立即
 ---
 
 ## 版本变更
+
+### v0.3 → v0.4(本次更新)
+
+**用户决策**:Server 语言栈切换
+- ✅ Server: **Go**(原 TypeScript/Node)
+- ✅ WebUI: **JS** (Next.js + React)
+- ✅ CLI:Go 单 binary(`conductor daemon|hub|run|ls|cancel|workflow`)
+- ✅ 协议共享:JSON Schema 单一来源
+
+**新增 §17 Go 实现的特定设计考量**(6 小节):
+- §17.1 原生收益对比表(context.Context / errgroup / os/exec / 单 binary)
+- §17.2 关键 Go 设计决策(D1-D8):context 一等公民、SubprocessClient 包装、WS 选 coder/websocket、CLI 子命令、protocol codegen
+- §17.3 关键 Go 库选型表(11 类)
+- §17.4 部署与发行(CGO_ENABLED=0、跨平台、Docker scratch)
+- §17.5 测试策略(real.e2e 命名约定 + race 检测)
+- §17.6 webui ↔ server 协议边界(OpenAPI + openapi-typescript)
+
+**重写或大改的章节**(从 TS 改 Go 语法 / 加入 Go 上下文):
+- §0 一句话定位 + Go 收益/代价表
+- §1 竞品表 Conductor 行(语言栈/持久化/取消原语)
+- §3 仓库布局(Go server + JS webui 双 workspace)
+- §5.1 Provider 接口 Go 版(AgentClient / AgentSession)
+- §6 Agent Runner 引入 context.Context 取消语义
+- §8 末尾 Go 实现要点(errgroup + for loop + 函数签名)
+- §10 PlayerRegistry / PlayerHub Go 语法
+- §11.1 Storage interface + 双实现(改 Go)
+- §12.8 WorkflowState Go struct
+- §14.4 StageContext 引入 ctx,§14.4.1 详述 context 取消语义
+- §14.6 CancelPolicy + errgroup fail-fast 实现
+- §14.7 IdempotencyKey Go 风格(sha256 截断)
+
+**§16 决策表扩展**:新增 Server 语言栈、WebUI 语言栈、Protocol 共享 3 行
+
+**下一轮(待用户输入)**:
+- webui 框架终选(Next.js 14 App Router vs SvelteKit vs Remix)
+- webui 何时启动(Phase 1 同步 vs Phase 2 末 vs Phase 3)
+- CLI flag 库终选(cobra vs stdlib flag)
+- OpenAPI 生成工具(swag vs ogen vs hand-written)
 
 ### v0.2 → v0.3(本次更新)
 
