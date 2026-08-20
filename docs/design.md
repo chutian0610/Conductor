@@ -1119,11 +1119,12 @@ DELETE /v1/runs/<runId>?force=true            # 立即
 |---|---|---|
 | 取消传播 | `context.Context` 一等公民,§14 直接映射 | AbortSignal + 手工协议 |
 | 并发原语 | `errgroup` 一行实现 parallel stage + 取消传播 | Promise.allSettled + 手工 race condition 处理 |
-| subprocess 管理 | `os/exec` + `cmd.Process.Kill()` + `defer cmd.Wait()` | child_process + 手工 cleanup hooks |
+| subprocess 管理 | `os/exec` + `cmd.Process.Kill()` + `defer cmd.Wait()`,**所有 provider 统一** | child_process,但 provider 接法不统一(SDK/ACP/app-server 三种) |
 | 持久化 | `modernc.org/sqlite`(纯 Go,无 cgo)+ sqlc | better-sqlite3 + Kysely/Prisma |
 | 部署 | 单 binary 静态链接(~30MB),无 runtime | Node binary + node_modules + 版本管理 |
 | 内存/启动 | daemon 启动 < 100ms,常驻 50-80MB | Node 启动 200-500ms,常驻 100-150MB |
 | 类型安全 | 编译期 + `go vet` + 静态分析 | TS 编译期 + ESLint,运行时仍可能逃逸 |
+| Provider SDK | **无需依赖**——直连 CLI,统一 SubprocessClient(§17.7) | 依赖各 provider TS SDK(@anthropic-ai/...) |
 
 ### 17.2 关键 Go 设计决策
 
@@ -1306,6 +1307,148 @@ webui/packages/api-client/               # openapi-typescript 产物
 
 WS 消息 schema 单独维护:`shared/protocol/events.schema.json`。
 
+### 17.7 Provider SDK 不依赖性(Go 后端关键澄清)
+
+> v0.4 追加。用户问题:"如果 server 是 Go,是不是 Claude Code 无法用 Paseo 那种 SDK 方式?"
+
+**答案**:是的,但这不是损失,是简化。
+
+#### 17.7.1 Claude Agent SDK 是 TS-only
+
+Paseo 的 `packages/server/src/server/agent/providers/claude/agent.ts` 调 `@anthropic-ai/claude-agent-sdk`(TypeScript SDK)。SDK 不能从 Go 直接调。**Anthropic 没有官方 Go SDK**。
+
+但 SDK 的本质是**薄包装**:
+1. `spawn` `claude` CLI 子进程
+2. 写 prompt 到 stdin 或 `-p` 参数
+3. 解析 stdout 的 `--output-format stream-json`(NDJSON 事件流)
+4. 管理 `--session-id` / `--resume` 持久化
+5. 转发 MCP 配置(`--mcp-config`)
+6. 工具权限(`--allowedTools` 等)
+
+**真正的能力在 CLI 里**。SDK 只是把这些暴露成 Promise API + typed events。
+
+#### 17.7.2 Go 直接走 CLI,所有 provider 统一"subprocess + 协议解析"
+
+| Provider | Go 接入方式 | 协议层 |
+|---|---|---|
+| **Claude Code** | `exec.Command("claude", ["-p", ..., "--output-format", "stream-json"])` | NDJSON(每行一 JSON event) |
+| **Codex** | `exec.Command("codex", ["app-server"])` | JSON-RPC over stdio |
+| **Pi / OMP / ACP** | `exec.Command("pi", [...])` | JSON-RPC over stdio(Agent Client Protocol) |
+| **自定义 HTTP agent** | `net/http` client | HTTP/JSON |
+
+**意外但关键的收益**:Conductor 在 Go 里**所有 provider 是同一种模式**——`SubprocessClient`(§17.2 D2)+ 协议解析层。Paseo 因为是 TS,**三种 provider 接法不一样**(SDK / ACP / app-server);Conductor 反而**代码更统一**。
+
+#### 17.7.3 真实代价(可控)
+
+SDK 提供的便利里,以下需要 Conductor 自己实现,都是几百行级:
+
+| SDK 能力 | Go 替代实现 | 工作量 |
+|---|---|---|
+| Session hooks(PreToolUse / PostToolUse) | CLI 通过 stream-json 暴露,Go 解析 event 类型 | 小 |
+| 类型化事件 | Go struct + `json.Unmarshal` + `validate:"..."` tag | 小 |
+| CLI 版本检测 | 自己跑 `claude --version` 比对 | 微 |
+| MCP 配置加载 | JSON 解析,$CONDUCTOR_HOME/mcp.json | 小 |
+| 权限回调 | CLI 把权限请求当 event emit,Conductor 订阅 channel 转给 Workflow 层 | 小 |
+
+这些**本来就属于 Conductor 想控的边界**(§6.1 已硬约束"不干预 provider 内部")。
+
+#### 17.7.4 SubprocessClient 的统一接口
+
+```go
+// internal/provider/base/subprocess.go —— 所有 provider 共享
+type SubprocessClient struct {
+    cmd    *exec.Cmd
+    stdin  io.WriteCloser
+    stdout io.ReadCloser
+    stderr io.ReadCloser
+    events chan AgentStreamEvent
+    parser ProtocolParser  // 协议解析器:NDJSON / JSON-RPC / ...
+}
+
+func (c *SubprocessClient) Send(ctx context.Context, prompt AgentPrompt) error {
+    return c.parser.WriteRequest(c.stdin, prompt)  // 不同 provider 不同实现
+}
+
+func (c *SubprocessClient) Events() <-chan AgentStreamEvent { return c.events }
+
+func (c *SubprocessClient) Cancel(ctx context.Context) error {
+    // §14: SIGTERM → grace → SIGKILL
+    _ = c.cmd.Process.Signal(syscall.SIGTERM)
+    select {
+    case <-time.After(30 * time.Second):
+        _ = c.cmd.Process.Kill()
+    case <-c.cmdDone():
+    }
+    return nil
+}
+
+func (c *SubprocessClient) Close(ctx context.Context) error {
+    close(c.events)
+    return c.cmd.Wait()
+}
+
+type ProtocolParser interface {
+    WriteRequest(w io.Writer, req any) error
+    ReadEvent(r io.Reader, ch chan<- AgentStreamEvent) error  // goroutine 里跑
+}
+```
+
+#### 17.7.5 三个具体 provider 实现要点
+
+**Claude Code**(NDJSON parser):
+```go
+// Claude parser: stream-json → AgentStreamEvent
+// CLI flags: -p "<prompt>" --output-format stream-json --session-id <id> --resume <id>
+type ClaudeParser struct{}
+
+func (p *ClaudeParser) ReadEvent(r io.Reader, ch chan<- AgentStreamEvent) error {
+    return jsonl.NewDecoder(r).Decode(func(ev ClaudeEvent) {
+        switch ev.Type {
+        case "assistant":    ch <- AgentStreamEvent{Kind: "text", Text: ev.Message.Content}
+        case "tool_use":     ch <- AgentStreamEvent{Kind: "tool_call", ...}
+        case "tool_result":  ch <- AgentStreamEvent{Kind: "tool_result", ...}
+        case "permission_request":
+            ch <- AgentStreamEvent{Kind: "permission_request", ...}
+        case "result":       ch <- AgentStreamEvent{Kind: "finish", ...}
+        }
+    })
+}
+```
+
+**Codex**(JSON-RPC parser):
+```go
+// Codex app-server: JSON-RPC 2.0 over stdio
+// CLI flags: app-server
+type CodexParser struct{}
+
+func (p *CodexParser) ReadEvent(r io.Reader, ch chan<- AgentStreamEvent) error {
+    return jsonrpc.NewStream(r).Read(func(msg jsonrpc.Message) {
+        // map thread.started / turn.started / item.completed / ...
+    })
+}
+```
+
+**ACP**(JSON-RPC + ACP spec):
+```go
+// 任意 ACP-compatible agent
+type ACPParser struct{ /* 与 Codex 同,但方法名是 ACP 规范的 */ }
+```
+
+#### 17.7.6 与 Paseo 对比
+
+| 维度 | Paseo (TS) | Conductor (Go) |
+|---|---|---|
+| Claude 接入 | TS SDK(封装 CLI) | 直接调 CLI(stream-json) |
+| Codex 接入 | TS SDK 调 app-server | JSON-RPC over stdio |
+| ACP 接入 | ACP base class | ACP base class(同构) |
+| Provider 接法数量 | **3 种**(SDK/ACP/app-server) | **1 种**(subprocess + parser) |
+| 运行时依赖 | Node + provider CLI binaries | 仅 provider CLI binaries |
+| Session resume | SDK 内置 | CLI `--resume <id>` + 自己管 handle |
+| Hooks / 权限 | SDK callback | stream-json event + Go channel |
+| 版本兼容 | SDK 跟随 CLI | 直跟 CLI,需自己 `--version` 检测 |
+
+> **结论**:Go 后端不"丢失" Claude SDK,而是**绕开 SDK 直连 CLI**——SDK 的价值在 Go 里被 §17.7.4 的 `SubprocessClient` + `ProtocolParser` 替代,且**统一性更高**。
+
 ## 附录 B:已读的竞品源文件清单(供追溯)
 
 - Paseo:
@@ -1363,6 +1506,20 @@ WS 消息 schema 单独维护:`shared/protocol/events.schema.json`。
 - webui 何时启动(Phase 1 同步 vs Phase 2 末 vs Phase 3)
 - CLI flag 库终选(cobra vs stdlib flag)
 - OpenAPI 生成工具(swag vs ogen vs hand-written)
+
+**v0.4 后续追加**:
+
+**用户问题回应**:Go 后端不能直接用 Claude Agent SDK(TS-only),但这反而是收益——SDK 是 CLI 的薄包装,Go 直连 CLI 可让所有 provider 统一为 `SubprocessClient + ProtocolParser` 一种接法(§17.7)。Paseo 因 TS 有 SDK/ACP/app-server 三种接法,Conductor 只有一种。
+
+**新增 §17.7 Provider SDK 不依赖性**(6 小节):
+- §17.7.1 SDK 本质是薄包装的说明
+- §17.7.2 Go 直接走 CLI,所有 provider 统一模式表
+- §17.7.3 真实代价(可控,几百行级)与对策表
+- §17.7.4 SubprocessClient 统一接口 Go 代码
+- §17.7.5 三个具体 provider 实现要点(Claude NDJSON / Codex JSON-RPC / ACP JSON-RPC)
+- §17.7.6 与 Paseo 对比表(Go 直连 CLI vs TS 三种接法)
+
+§17.1 表新增一行:**Provider SDK 无需依赖**——直连 CLI 统一 SubprocessClient。
 
 ### v0.2 → v0.3(本次更新)
 
