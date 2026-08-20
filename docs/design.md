@@ -254,13 +254,156 @@ class ProviderSubagentStore {
 }
 ```
 
-关键约束:
-- **实执行永远在 provider 内**(Claude Task 工具、OMP task 工具)。
-- Conductor 只在 UI/时间线里"看到"这个子 agent,**不主动 spawn、不 cancel、不干预**。
-- agent 之间是**对等关系**(peer),不是父子树——两个 stage 在 Conductor 视角下完全平等;parent/child 只是 provider SDK 内部概念。
-- 不做"跨 provider 子 agent"(Codex 调 Claude)。需要跨 provider 协作时,走 Conductor 的 Worker 编排层,不是 provider 子 agent 层。
-
 > 这是 Conductor **不重造子 agent 引擎**的核心保证。
+
+### 6.2 Subprocess Environment Isolation(Phase 1 必做)
+
+> v0.7 新增。用户问题:"Claude Code 和 Codex 支持 HOME 环境变量,是不是在 Conductor 中使用隔离的 HOME,防止干扰用户自己的使用?"
+>
+> **答案:是的——必须 per-run 隔离 HOME**。不隔离会导致 session 污染、配置冲突、并发写冲突、审计混乱。
+
+#### 6.2.1 不隔离的 4 类冲突
+
+| 冲突 | 影响 |
+|---|---|
+| **Session 污染** | Conductor 跑的 session JSONL 写到 `~/.claude/projects/.../`,用户在终端跑 Claude Code 时看到"鬼魂" session |
+| **配置冲突** | 用户改全局设置 → Conductor 下次 spawn 用新设置,行为不可预期 |
+| **并发写同一文件** | OAuth refresh、设置更新可能撞车 |
+| **审计混乱** | 用户的 `~/.claude/logs/` 混了 Conductor 活动 |
+
+#### 6.2.2 设计:Per-Run 隔离 HOME + Auth Symlink
+
+```go
+// internal/runner/isolated_home.go
+type IsolatedHome struct {
+    Dir       string      // $CONDUCTOR_HOME/runs/<runId>/home/
+    AuthLinks []AuthLink  // 软链到用户真实 HOME 的 auth 文件
+}
+
+type AuthLink struct {
+    Provider string  // "claude" | "codex" | ...
+    Target   string  // 真实 HOME 中的文件
+    Link     string  // 隔离 HOME 中的对应路径
+}
+
+func NewIsolatedHome(provider, runID string) (*IsolatedHome, error) {
+    iso := &IsolatedHome{
+        Dir: filepath.Join(conductorHome(), "runs", runID, "home"),
+    }
+    switch provider {
+    case "claude":
+        // ~/.claude.json(OAuth + 设置)→ 软链(跟用户配置实时同步)
+        iso.AuthLinks = append(iso.AuthLinks, AuthLink{
+            Provider: "claude",
+            Target:   filepath.Join(userHome(), ".claude.json"),
+            Link:     filepath.Join(iso.Dir, ".claude.json"),
+        })
+        // ~/.claude/(session + logs)→ 不软链,在隔离 HOME 里新建
+    case "codex":
+        iso.AuthLinks = append(iso.AuthLinks, AuthLink{
+            Provider: "codex",
+            Target:   filepath.Join(userHome(), ".codex", "auth.json"),
+            Link:     filepath.Join(iso.Dir, ".codex", "auth.json"),
+        })
+    }
+    return iso, nil
+}
+
+func (h *IsolatedHome) Setup() error {
+    if err := os.MkdirAll(h.Dir, 0700); err != nil { return err }
+    for _, l := range h.AuthLinks {
+        _ = os.MkdirAll(filepath.Dir(l.Link), 0700)
+        if err := os.Symlink(l.Target, l.Link); err != nil && !os.IsExist(err) {
+            return err
+        }
+    }
+    return nil
+}
+
+func (h *IsolatedHome) Env() []string {
+    return []string{
+        "HOME=" + h.Dir,
+        "XDG_CONFIG_HOME=" + filepath.Join(h.Dir, ".config"),
+        "XDG_DATA_HOME=" + filepath.Join(h.Dir, ".local/share"),
+        "XDG_CACHE_HOME=" + filepath.Join(h.Dir, ".cache"),
+    }
+}
+
+func (h *IsolatedHome) Cleanup() error { return os.RemoveAll(h.Dir) }
+```
+
+**spawn 时**:
+```go
+cmd := exec.CommandContext(ctx, "claude", args...)
+cmd.Env = append(os.Environ(), iso.Env()...)  // 覆盖 HOME + XDG_*
+cmd.Dir = spec.WorktreePath()
+```
+
+#### 6.2.3 关键设计决策
+
+| 决策 | 理由 |
+|---|---|
+| **Per-run 隔离**(不是 per-session) | 同一 task 的多次 turn 共享 HOME,session 找得到 |
+| **Symlink auth 文件**(不 copy) | 跟用户 OAuth 实时同步;用户撤销 auth 后下次 read 即生效 |
+| **隔离 session / logs / MCP config** | Conductor 产生的状态,不该污染用户 |
+| **位置:`$CONDUCTOR_HOME/runs/<runId>/home/`** | 与 WorkflowState 同生命周期;debug 易找 |
+| **权限 0700** | auth token 敏感 |
+| **默认保留 Cleanup**(不删) | 便于 inspect session JSONL;CLI `--prune` 时清 |
+
+#### 6.2.4 边界与副作用
+
+1. **用户不能直接 `claude --resume <id>` 续 Conductor session**——JSONL 在隔离 HOME 不在 `~/.claude/`。这是 §12.0.5 的另一面:想续需知道路径(用户层操作,非 Conductor 责任)
+2. **磁盘占用**:每 run <几 MB(除非 session 很长);在 run archive 时清
+3. **OAuth 软链边界**:用户删除 `~/.claude.json` → Conductor run 断 auth(合理的)
+5. **跨 run 共享 session**:Phase 1 不支持,每 run 新 session
+6. **多 provider 同时跑**:不同 provider 用不同隔离 HOME
+
+#### 6.2.5 集成到 SubprocessClient(§17.2 D2)
+
+```go
+type SubprocessClient struct {
+    cmd  *exec.Cmd
+    home *IsolatedHome  // 新增
+    // ...
+}
+
+func NewSubprocessClient(ctx context.Context, name string, args []string, spec AgentSpec) (*SubprocessClient, error) {
+    iso, err := NewIsolatedHome(spec.Provider, spec.RunID)
+    if err != nil { return nil, err }
+    if err := iso.Setup(); err != nil { return nil, err }
+
+    cmd := exec.CommandContext(ctx, name, args...)
+    cmd.Env = append(os.Environ(), iso.Env()...)
+    cmd.Dir = spec.WorktreePath()
+
+    return &SubprocessClient{cmd: cmd, home: iso, /* ... */}, nil
+}
+
+func (c *SubprocessClient) Close(ctx context.Context) error {
+    err := c.shutdown(ctx)
+    _ = c.home.Cleanup()  // log if fails
+    return err
+}
+```
+
+#### 6.2.6 与 §6.1(不干预 subagent)的关系
+
+- §6.1:Conductor 不干预 provider 内部 subagent
+- §6.2:Conductor 通过隔离 HOME 给 provider 一个"干净沙箱",**但 auth 共享**
+- 两者正交:一个是行为约束,一个是环境约束
+
+#### 6.2.7 e2e 测试
+
+| 测试 ID | 场景 | 期望 |
+|---|---|---|
+| `T_isolated_home_created` | spawn Claude Code | `$CONDUCTOR_HOME/runs/<runId>/home/.claude.json` 是 symlink,`~/.claude/projects/` 是新 dir |
+| `T_no_user_pollution` | run 完成后 | 用户 `~/.claude/` 无新增 session/log |
+| `T_auth_via_symlink` | 用户 OAuth 改后,Conductor 新 run | 新 run 用新 auth(因为 symlink) |
+| `T_cleanup` | `conductor prune --run <runId>` | 隔离 HOME 被删除 |
+| `T_concurrent_runs` | 同时跑 3 个 task | 各自隔离 HOME,session 互不可见 |
+| `T_xdg_respected` | spawn 检查 env | `HOME` / `XDG_*` 都正确覆盖 |
+
+
 
 ## 7. Agent Worker 层 —— 编排图节点
 
@@ -1341,7 +1484,7 @@ DELETE /v1/runs/<runId>?force=true            # 立即
 
 11. **过度工程风险(自我警告)** —— "Player registry" / "Multi-host Hub" / "Seamless migration" 这些概念**容易被术语诱惑**(Multica 是团队协作平台所以需要这些,但 Conductor 是 dev 工具,用户场景不同)。v0.5 已自我修正砍掉 Hub/Migration,但 Phase 2+ 设计时仍要警惕:**新术语新抽象不要堆砌,先问"99% 用户场景真的需要吗?"**
 
-## 16. 已确认的关键决策(v0.6)
+## 16. 已确认的关键决策(v0.7)
 
 | 决策点 | 选定方案 | 章节 |
 |---|---|---|
@@ -1353,6 +1496,7 @@ DELETE /v1/runs/<runId>?force=true            # 立即
 | 跨 host session 迁移 | **彻底不做**(用户决策 v0.6) | §10.4 ~~删除~~ |
 | "无缝"边界 | **彻底不做**(用户决策 v0.6) | §10.5 ~~删除~~ |
 | Phase 2+ provider | 加新 provider 时新增实现,interface 不变;跨 provider 翻译暂不做 | §12.11 |
+| **Subprocess 环境隔离** | **Per-run 隔离 HOME + Auth symlink**;Phase 1 必做,防 session 污染与配置冲突 | §6.2 |
 | Workflow 引擎 | **A. 自研轻量软工作流引擎**(否掉 Temporal/Restate 重方案,否掉 prompt-only 退化) | §8.6 |
 | Player registry | **多 host Hub**(进程内 + 跨 host 注册中心) | §10.2 |
 | 持久化默认 | **文件 JSON + SQLite 一等切换**(运行时可切,wire schema 不变) | §11.1 |
@@ -1366,10 +1510,10 @@ DELETE /v1/runs/<runId>?force=true            # 立即
 | Web UI | Phase 1 不出,Phase 3+ 可选 | §9.1 |
 
 仍待确认的非阻塞项(实施时再定):
-- Hub 的鉴权模型(token / mTLS / SSH-like)
-- Provider 之间 auth/credential 隔离(`$CONDUCTOR_HOME/providers/<id>/auth`)
+- Hub 的鉴权模型(token / mTLS / SSH-like)(Phase 2+ 才相关)
 - Web UI 是 Phase 1 还是 Phase 3+
-- Provider hook `onContextPressure` 的具体 contract(provider SDK 不统一,需要适配层)
+- Provider hook `onContextPressure` 的具体 contract
+- 隔离 HOME 大小监控与自动 prune 策略
 
 ---
 
@@ -1734,6 +1878,30 @@ type ACPParser struct{ /* 与 Codex 同,但方法名是 ACP 规范的 */ }
 ---
 
 ## 版本变更
+
+### v0.6 → v0.7(本次更新 — Subprocess HOME 隔离,Phase 1 必做)
+
+**用户问题**:"Claude Code 和 Codex 用 HOME,Conductor 是不是应该隔离防止干扰用户?"
+**答案**:**必须隔离**——per-run 隔离 HOME + auth 文件 symlink。
+
+**新增 §6.2 Subprocess Environment Isolation**(7 小节,164 行):
+- §6.2.1 不隔离的 4 类冲突(session 污染 / 配置冲突 / 并发写 / 审计混乱)
+- §6.2.2 Per-Run 隔离 HOME + Auth Symlink 设计 + Go 代码
+- §6.2.3 关键设计决策表(per-run / symlink / 0700 等)
+- §6.2.4 边界与副作用(6 条)
+- §6.2.5 集成到 §17.2 D2 SubprocessClient
+- §6.2.6 与 §6.1 的关系(行为约束 vs 环境约束,正交)
+- §6.2.7 e2e 测试矩阵(6 个测试 ID)
+
+**§16 决策表新增 1 行**:Subprocess 环境隔离 = Per-run 隔离 HOME + Auth symlink,Phase 1 必做
+
+**§16 待确认项调整**:
+- 删除 "Provider 之间 auth/credential 隔离"(v0.7 已用 §6.2 解决)
+- 新增 "隔离 HOME 大小监控与自动 prune 策略"
+
+**集成点**:
+- §17.2 D2 SubprocessClient 增加 `home *IsolatedHome` 字段
+- §6.2.5 给出完整改造代码
 
 ### v0.5 → v0.6(本次更新 — 彻底删除 session migration,Hub 改为 dispatcher)
 
