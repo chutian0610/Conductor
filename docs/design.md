@@ -349,6 +349,7 @@ func (s *CodexSession) pumpEvents() {
 
 ```toml
 # ~/.codex/config.toml —— 用户自己配置,Conductor 不维护
+
 # 默认:OpenAI 直连
 [model_providers.openai]
 # Codex 内置,无需配置
@@ -370,9 +371,40 @@ name = "OpenAI via LLM proxy"
 base_url = "http://proxy.example.com"
 env_key = "OPENAI_API_KEY"
 
+# 非 OpenAI 自定义 provider(必须显式跳过 OAuth)
+[model_providers.minimax]
+name = "MiniMax"
+base_url = "http://127.0.0.1:8000/v1"
+env_key = "MINIMAX_API_KEY"
+wire_api = "responses"            # 选 wire protocol
+requires_openai_auth = false      # 跳过 ChatGPT OAuth
+
 # 默认 model_provider
 model_provider = "openrouter"
 ```
+
+**Schema 字段**(Phase 1 读取):
+
+| 字段 | 类型 | 必填 | 含义 |
+|---|---|---|---|
+| `name` | string | optional | 显示标签(Phase 1 保留,未来 spec-list 展示用) |
+| `base_url` | string | required | API endpoint;空 = spec create 拒绝 |
+| `env_key` | string | optional | 装 API key 的 env var 名;空 = 本地 provider(Ollama) |
+| `wire_api` | string | optional | `"responses"`(Codex 默认)或 `"chat"`;为 custom 显式锁定 wire protocol |
+| `requires_openai_auth` | bool | optional | **认证入口选择**:`false` 跳过 ChatGPT OAuth,直接用 provider 自己的 API key;`true`(默认)走 Codex OAuth |
+
+未知字段静默忽略 — Codex 后续版本加字段不破坏 Conductor。
+
+**`requires_openai_auth` 决策矩阵**(v0.13 之后 Codex app-server 的判断):
+
+| `requires_openai_auth` | provider 类型 | 认证路径 |
+|---|---|---|
+| `true`(默认) | 有 OpenAI 账号(OpenAI / OpenRouter / 任何 OpenAI 兼容代理) | API key(env_key 指向的 env var)或 ChatGPT OAuth / Device Code 三选一 |
+| `false` | 自建 / 非 OpenAI(MiniMax / LiteLLM / 内部 proxy / Ollama-with-auth) | **不**走任何 ChatGPT OAuth,直接用 `env_key` 装 API key 发请求 |
+
+所以 MiniMax 这种场景:
+- 不设 `requires_openai_auth = false` → app-server 跑 `account/read` 看到 `requiresOpenaiAuth: true` → 尝试 OAuth → 没有 OpenAI 账号 → 401
+- 设了 → app-server 跳过 OAuth,直接用 `MINIMAX_API_KEY` env var 发请求
 
 **用户用法**:
 ```bash
@@ -390,9 +422,15 @@ conductor run --model gpt-5 "..."
 
 # 本地 Ollama
 conductor run --provider ollama --model llama3 "..."
+
+# MiniMax(custom,无 OpenAI 账号)
+export MINIMAX_API_KEY=...
+conductor run --provider minimax --model MiniMax-Text-01 "..."
 ```
 
 > Conductor 不写死 model_provider;运行时从 `~/.codex/config.toml` 读,允许 user 在 Codex 配置层切。
+
+> **环境变量注入**: Conductor 不注入 env var — API key 必须由用户在 `conductor run` 之前 export,或在命令前缀传。codex app-server 启动时读 env。
 
 ### 5.3 与 Pi 集成的对比
 
