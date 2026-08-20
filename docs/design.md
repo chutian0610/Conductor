@@ -156,29 +156,143 @@ type AgentSpec = {
 >
 > **v0.11 修订**:此形状与 Pi CLI flags 一一对应。Conductor 内部 AgentSpec 直接映射到 Pi session 配置参数(`provider`, `model`, `skills`, `mcpConfig`, `tools`, `thinking`, `cwd` 等)。详见 §5.2 Pi 集成层。
 
-## 5. Pi 集成层(Pi Integration Layer)
+## 5. Codex 集成层(Codex Integration Layer)
 
-> **v0.11 重大简化**:Conductor **只有 Pi 这一个 provider**,且与 Pi 深度集成。**不再有通用 provider 抽象**——直接用 `@earendil-works/pi-coding-agent` SDK 的类型。
+> **v0.12 重大简化**:Conductor **只有 Codex 这一个 provider**。多模型能力通过 Codex 原生的 `[model_providers.<id>]` 配置实现,默认指向 OpenRouter。
+>
+> **v0.12 关键洞察**:Codex 不止支持 OpenAI 模型——通过 `~/.codex/config.toml` 的 `[model_providers.<id>]` 块,可以挂任意 OpenAI-compatible API(Mistral / Ollama / OpenRouter / LiteLLM / 自建代理)。OpenRouter 一次性覆盖 Claude / Gemini / Llama / Mistral 等 100+ 模型。
 
 ### 5.0 集成策略
 
-**Conductor 不重新发明 agent runtime**,而是:
-- ✅ **直接 import Pi SDK 类型**(`AgentSession`, `AgentProvider`, 等)
-- ✅ **直接用 Pi 的 skill 目录约定**(`$CONDUCTOR_HOME/skills/` = Pi skill 路径)
-- ✅ **直接用 Pi 的 MCP config 格式**(`--mcp-config` JSON)
-- ✅ **直接用 Pi 的 session JSONL** 作为持久化格式
-- ✅ **直接用 Pi 的取消 / approval / compaction 机制**
-- ✅ **直接用 Pi 的 context files**(`.conductor/context/*.md` 等)
+**Conductor 复用 Codex 全套机制**,而不是重新发明:
 
-**Conductor 在 Pi 之上加的价值**:
+| Conductor 需要 | Codex 已有 | Conductor 如何复用 |
+|---|---|---|
+| Session 持久化 + resume | Codex session JSONL(`~/.codex/sessions/`) | 直接读 |
+| MCP 配置 | `--mcp-config` JSON | 直接传 |
+| 工具权限 / approval | Codex approval model | Conductor UI 包一下 |
+| Skills / 扩展 | Codex `AGENTS.md` / 配置文件 | 直接读 |
+| Compaction | Codex `/compact` | 直接调 slash command |
+| 取消 | `codex app-server` interrupt | `codexAppServer.interrupt()` |
+| Provider / Model | `[model_providers.<id>]` + `--model` | 直接传 OpenAI-compatible 模型名 |
+| 多模型 | OpenRouter 配置 | Codex provider 指向 OpenRouter |
+
+**Conductor 在 Codex 之上加的价值**:
 - PDCA / GSD workflow 引擎(§8)
 - 多 host Hub 调度(§10)
 - Per-task per-host contextBus(§12)
-- HOME 隔离(§6.2)
-- WorkflowContext 持久化 + 迁移
+- HOME 隔离 + `.auth/` 共享(§6.2)
+- WorkflowContext 持久化 + cursor 恢复
 - 取消三协议合一(§14)
 
-### 5.1 Pi SDK 集成(替换原通用 AgentClient 接口)
+### 5.1 Codex 集成(替换原 v0.11 Pi 集成)
+
+```typescript
+// packages/provider/codex/index.ts —— Codex app-server JSON-RPC 客户端
+import { CodexAppServer } from "@openai/codex-app-server-sdk";  // 假设 SDK
+
+export interface ConductorAgentSession {
+  id: string;
+  provider: "codex";
+  send(prompt: AgentPrompt, signal?: AbortSignal): Promise<AgentTurnResult>;
+  events(): AsyncIterable<AgentStreamEvent>;
+  cancel(signal?: AbortSignal): Promise<void>;
+  close(): Promise<void>;
+}
+
+export async function createCodexSession(
+  spec: ConductorLaunchSpec,
+  signal?: AbortSignal,
+): Promise<ConductorAgentSession> {
+  // 1. 读 ~/.codex/config.toml 解析 [model_providers] 配置
+  // 2. 找到对应的 model_provider,获取 base_url + env_key
+  // 3. spawn `codex app-server` subprocess
+  // 4. JSON-RPC over stdio 通信
+  // 5. AbortSignal 监听 → 调 RPC `interrupt`
+  // 6. session JSONL 写到 $CONDUCTOR_HOME/runs/<runId>/codex-sessions/
+}
+
+export interface ConductorLaunchSpec {
+  // Codex app-server 参数
+  model: string;                  // "anthropic/claude-opus-4-6" | "openai/gpt-5" | ...
+  // 上下文
+  cwd: string;
+  worktree?: WorktreeSpec;
+  // §6.2 隔离 HOME
+  isolatedHome: string;
+  // 透传 Codex
+  mcpConfig?: string;
+  systemPrompt?: string;
+  thinking?: "minimal" | "low" | "medium" | "high";
+  tools?: { allow?: string[]; exclude?: string[] };
+}
+```
+
+### 5.2 Codex provider 配置(用户侧)
+
+```toml
+# ~/.codex/config.toml —— 用户自己配置,Conductor 不维护
+# 默认:OpenAI 直连
+[model_providers.openai]
+# Codex 内置,无需配置
+
+# OpenRouter 代理(覆盖 100+ 模型)
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+env_key = "OPENROUTER_API_KEY"
+
+# Ollama 本地(可选)
+[model_providers.local_ollama]
+name = "Ollama"
+base_url = "http://localhost:11434/v1"
+
+# 自定义 proxy(可选)
+[model_providers.proxy]
+name = "OpenAI via LLM proxy"
+base_url = "http://proxy.example.com"
+env_key = "OPENAI_API_KEY"
+
+# 默认 model_provider
+model_provider = "openrouter"
+```
+
+**用户用法**:
+```bash
+# Claude via OpenRouter
+conductor run --model anthropic/claude-opus-4-6 "implement auth"
+
+# GPT-5 via OpenRouter(也走代理)
+conductor run --model openai/gpt-5 "review this PR"
+
+# Gemini via OpenRouter
+conductor run --model google/gemini-2.5-pro "write tests"
+
+# 直接 OpenAI(如果用户设 model_provider = openai)
+conductor run --model gpt-5 "..."
+
+# 本地 Ollama
+conductor run --provider ollama --model llama3 "..."
+```
+
+> Conductor 不写死 model_provider;运行时从 `~/.codex/config.toml` 读,允许 user 在 Codex 配置层切。
+
+### 5.3 与 Pi 集成的对比
+
+| 维度 | v0.11 Pi 深度集成 | **v0.12 Codex + OpenRouter** |
+|---|---|---|
+| Provider 数 | 1 (Pi) | 1 (Codex) + 配置层 |
+| 集成代码量 | ~30 行 | **~150 行(Codex JSON-RPC 完整实现)** |
+| 多模型 | ✅ Pi 20+ 原生 | ✅ OpenRouter 100+ 代理 |
+| 直连 Claude | ✅ Pi 原生 | ❌ 走 OpenRouter |
+| 直连 GPT | ✅ Pi 原生 | ✅ Codex 直连 |
+| 稳定性 | ⚠️ Mario 个人 | ✅ OpenAI 维护 |
+| 配置入口 | Conductor / Pi 配置 | **Codex config.toml(用户标准配置)** |
+| Provider 替换 | 改 Conductor 代码 | **改 config.toml,Conductor 不动** |
+
+> **v0.12 关键让步**:多模型从"Conductor 层"移到"Codex config 层"。用户改 `~/.codex/config.toml` 就够了,Conductor 不参与 provider 配置。这让 Conductor 代码更小、更稳定。
+
+
 
 ```typescript
 // packages/provider/pi/index.ts —— 直接 re-export Pi SDK
@@ -221,7 +335,7 @@ export async function createPiSession(
 
 > **v0.11 vs v0.10 对比**:v0.10 有通用 `AgentClient/AgentSession` 接口 + `PiAgentClient` 实现;v0.11 **删除接口**,Pi 类型直接用。
 
-### 5.2 Pi 概念映射(Conductor → Pi)
+
 
 | Conductor 概念 | Pi 等价物 | Conductor 如何复用 |
 |---|---|---|
@@ -343,16 +457,17 @@ class ProviderSubagentStore {
 >
 > **答案:是的——必须 per-run 隔离 HOME**。不隔离会导致 session 污染、配置冲突、并发写冲突、审计混乱。
 
-#### 6.2.1 不隔离的 4 类冲突
+#### 6.2.1 不隔离的冲突类型
 
 | 冲突 | 影响 |
 |---|---|
-| **Session 污染** | Conductor 跑的 session JSONL 写到 `~/.claude/projects/.../`,用户在终端跑 Claude Code 时看到"鬼魂" session |
+| **Session 污染** | Conductor 跑的 session JSONL 写到用户 `~/.claude/projects/.../`,用户在终端跑 Claude Code 时看到"鬼魂" session |
 | **配置冲突** | 用户改全局设置 → Conductor 下次 spawn 用新设置,行为不可预期 |
 | **并发写同一文件** | OAuth refresh、设置更新可能撞车 |
 | **审计混乱** | 用户的 `~/.claude/logs/` 混了 Conductor 活动 |
+| **Provider config 冲突(v0.12 新增)** | **Codex runtime 锁定一个 provider**,同一 HOME 下两次 spawn 想用不同 provider,后一次必须覆盖 config.toml;正在跑的 process 可能未释放文件。**per-invocation 隔离 HOME 解决** |
 
-#### 6.2.2 设计:Per-Run 隔离 HOME + Auth Symlink
+#### 6.2.2 设计:Per-Invocation 隔离 HOME + Auth Symlink + 动态 config.toml
 
 ```go
 // internal/runner/isolated_home.go
@@ -455,11 +570,12 @@ cmd.Dir = spec.WorktreePath()
 
 | 决策 | 理由 |
 |---|---|
-| **Per-run 隔离 HOME**(不是 per-session) | 同一 task 的多次 turn 共享 HOME,session 找得到 |
-| **Symlink auth 到 `$CONDUCTOR_HOME/.auth/`**(不是用户 HOME) | **v0.8 优化**——auth 单一来源,易重置,不依赖用户 auth 路径 |
+| **Per-invocation 隔离 HOME**(不是 per-run,不是 per-session) | **v0.12 修订**——Codex runtime 锁定一个 provider,每 stage 不同 provider 需独立 config.toml;per-invocation(每次 Codex spawn)才能支持异构 provider |
+| **Symlink auth 到 `$CONDUCTOR_HOME/.auth/<provider>/`**(按 provider 分目录) | **v0.12 新增**——不同 provider 可能有不同 auth(OpenAI key vs OpenRouter key vs 本地无 auth) |
 | **Symlink .auth/ 里的文件到用户 HOME** | 默认仍跟用户 OAuth 实时同步 |
+| **动态生成 `~/.codex/config.toml`** | **v0.12 新增**——Conductor 按 spec.provider 写 config.toml 到 HOME,user 不需要手动管 |
 | **隔离 session / logs / MCP config** | Conductor 产生的状态,不该污染用户,也不该 run 间互窜 |
-| **位置:`$CONDUCTOR_HOME/runs/<runId>/home/`** | 与 WorkflowState 同生命周期;debug 易找 |
+| **位置:`$CONDUCTOR_HOME/runs/<runId>/stages/<stageId>/`** | **v0.12 修订**——stage 级 HOME,与 Codex process 同生命周期 |
 | **权限 0700** | auth token 敏感 |
 | **默认保留 Cleanup**(不删) | 便于 inspect session JSONL;`conductor prune --run <id>` 时清 |
 
@@ -471,7 +587,91 @@ cmd.Dir = spec.WorktreePath()
 5. **跨 run 共享 session**:Phase 1 不支持,每 run 新 session
 6. **多 provider 同时跑**:不同 provider 用不同隔离 HOME
 
-#### 6.2.5 集成到 SubprocessClient(§17.2 D2)
+#### 6.2.5 v0.12 修订:Per-Invocation HOME + 动态 config.toml
+
+> **v0.12 关键修正**(用户洞察):Codex runtime 锁定一个 provider,**每次 Codex invocation 必须是独立 isolated HOME**——per-run 粒度不够。
+
+**问题场景**:
+- Run A stage 1 用 OpenRouter(Claude) → HOME `.codex/config.toml` `model_provider = "openrouter"`
+- Run A stage 2 想用 OpenAI(GPT-5) → **同一 HOME 的 config.toml 不行**,需要独立 HOME
+
+**解决方案**:
+- HOME 粒度:**per-invocation**(每次 Codex spawn)
+- 配置:`config.toml` 由 Conductor **动态生成**,从 `ConductorLaunchSpec` 派生
+- auth 文件:**按 provider 软链到 `.auth/<provider>/`**
+
+**动态生成 config.toml 示例**:
+
+```typescript
+// per-invocation HOME + config.toml
+async function setupInvocHome(spec: ConductorLaunchSpec): Promise<IsolatedHome> {
+  const home = NewIsolatedHome({
+    provider: spec.provider,
+    runId: spec.runId,
+    stageId: spec.stageId,
+    invocationId: spec.invocationId,
+  });
+  await home.Setup();
+
+  // 动态生成 config.toml
+  const configToml = `
+model_provider = "${spec.provider}"
+
+[model_providers.${spec.provider}]
+name = "${spec.providerLabel}"
+base_url = "${spec.baseUrl}"
+env_key = "${spec.envKey}"
+`;
+  await home.WriteFile(".codex/config.toml", configToml);
+
+  // 按 provider 软链 auth
+  await home.LinkAuth(spec.provider);
+
+  return home;
+}
+```
+
+**HOME 生命周期**:
+```
+Run 启动
+ ↓
+Stage 1: 创建 HOME-A,写 config.toml A,spawn codex-1
+ ↓ stage 1 跑...
+ ↓
+codex-1 退出 → HOME-A 保留(便于 debug + resume)
+ ↓
+Stage 2: 创建 HOME-B,写 config.toml B,spawn codex-2
+ ↓ stage 2 跑...
+ ↓
+Run 完成
+ ↓
+(可选)`conductor prune --run <id>` 清掉所有 HOME
+```
+
+**目录结构(v0.12 修订)**:
+
+```
+$CONDUCTOR_HOME/
+├── .auth/                          ← 共享 auth(按 provider 分)
+│   ├── openai/auth.json
+│   ├── openrouter/auth.json
+│   └── ollama/(本地无 auth)
+└── runs/<runId>/stages/<stageId>/
+    ├── home/                       ← per-invocation HOME
+    │   ├── .codex/
+    │   │   ├── config.toml         ← 动态生成
+    │   │   └── sessions/<s>.jsonl
+    │   └── .codex.json → $CONDUCTOR_HOME/.auth/<provider>/auth.json
+    └── invocation.json             ← invocation 元数据
+```
+
+**关键边界**:
+- 不同 invocation 之间**不共享 HOME**(因为 provider / auth / config 可能不同)
+- 同一 invocation 多次 turn **共享同一 HOME**(Codex session 复用 HOME)
+- run 内 stage 之间**不共享 HOME**(因为可能不同 provider)
+- run 之间的 HOME **互不干扰**
+
+#### 6.2.6 集成到 SubprocessClient(§17.2 D2)
 
 ```go
 type SubprocessClient struct {
@@ -499,13 +699,13 @@ func (c *SubprocessClient) Close(ctx context.Context) error {
 }
 ```
 
-#### 6.2.6 与 §6.1(不干预 subagent)的关系
+#### 6.2.7 与 §6.1(不干预 subagent)的关系
 
 - §6.1:Conductor 不干预 provider 内部 subagent
 - §6.2:Conductor 通过隔离 HOME 给 provider 一个"干净沙箱",**但 auth 共享**
 - 两者正交:一个是行为约束,一个是环境约束
 
-#### 6.2.8 v0.8 优化:共享 `.auth/` 目录(替代 v0.7 直链用户 HOME)
+#### 6.2.9 v0.8 优化:共享 `.auth/` 目录(替代 v0.7 直链用户 HOME)
 
 > v0.7 设计每 run symlink auth 到用户 HOME——会有 N 个 symlink 指向同一文件,v0.8 引入中间层 `$CONDUCTOR_HOME/.auth/`。
 
@@ -560,7 +760,7 @@ $CONDUCTOR_HOME/
 - 两个 run 在同一 cwd → 同一 project hash → session 文件名不同(用 session ID),但 logs / settings 文件会冲突
 - per-run 隔离 → 零冲突 + 一刀切清理 + 易 debug
 
-#### 6.2.7 e2e 测试
+#### 6.2.8 e2e 测试
 
 | 测试 ID | 场景 | 期望 |
 |---|---|---|
@@ -576,7 +776,7 @@ $CONDUCTOR_HOME/
 
 
 
-#### 6.2.9 为什么 Per-Run(而不是 Per-Spec)
+#### 6.2.10 为什么 Per-Invocation(而不是 Per-Run 或 Per-Spec)
 
 > v0.8 补充。用户问题:"为啥是 per run,而不是 per-spec?"
 
@@ -1720,15 +1920,16 @@ DELETE /v1/runs/<runId>?force=true            # 立即
 
 11. **过度工程风险(自我警告)** —— "Player registry" / "Multi-host Hub" / "Seamless migration" 这些概念**容易被术语诱惑**(Multica 是团队协作平台所以需要这些,但 Conductor 是 dev 工具,用户场景不同)。v0.5 已自我修正砍掉 Hub/Migration,但 Phase 2+ 设计时仍要警惕:**新术语新抽象不要堆砌,先问"99% 用户场景真的需要吗?"**
 
-## 16. 已确认的关键决策(v0.11)
+## 16. 已确认的关键决策(v0.12)
 
 | 决策点 | 选定方案 | 章节 |
 |---|---|---|
 | Server 语言栈 | **TypeScript/Node.js**(单栈;AbortController 原生支持 §14) | §0, §17 |
 | WebUI 语言栈 | **TypeScript/Next.js 14** | §3 |
 | Phase 1 形态 | **本地优先**(local-first),单 host daemon,Paseo 模型;无 Hub | §10 |
-| Provider 策略 | **Pi 深度集成**:直接用 Pi SDK 类型、Pi skill、Pi session、Pi MCP、Pi approval、Pi cancellation | §5 |
-| Conductor 范围 | **只在 Pi 之上加价值**:workflow engine、Hub 调度、contextBus、HOME 隔离、persistence | §5.0 |
+| Provider 策略 | **Codex only + OpenRouter 多模型**——OpenAI 维护的 app-server;`~/.codex/config.toml` 配 `[model_providers.openrouter]` 覆盖 100+ 模型 | §5 |
+| Conductor 范围 | **只在 Codex 之上加价值**:workflow engine、Hub 调度、contextBus、HOME 隔离、persistence | §5.0 |
+| Provider 配置入口 | **用户 ~/.codex/config.toml**(标准 Codex 配置),Conductor 不参与 | §5.2 |
 | 多 host task 模型 | **task 不跨机器**;Hub(Phase 2+)= dispatcher,分发不同 task 给不同 host | §10.2 |
 | 跨 host session 迁移 | **彻底不做**(用户决策 v0.6) | §10.4 ~~删除~~ |
 | "无缝"边界 | **彻底不做**(用户决策 v0.6) | §10.5 ~~删除~~ |
@@ -2114,6 +2315,43 @@ type ACPParser struct{ /* 与 Codex 同,但方法名是 ACP 规范的 */ }
 ---
 
 ## 版本变更
+
+### v0.11 → v0.12(本次更新 — Codex + OpenRouter,放弃 Pi 深度集成)
+
+**用户决策**:**Codex only + OpenRouter 多模型配置**。Pi deep integration 路线放弃,原因是:
+- Pi 稳定性风险 vs 收益不划算
+- Codex 原生支持 OpenAI-compatible 协议(Mistral / Ollama / OpenRouter / 自建代理)
+- OpenRouter 一次性覆盖 Claude / Gemini / Llama / Mistral 等 100+ 模型
+- Codex = OpenAI 维护,稳定性高
+
+**Codex 多模型能力核实**(OpenAI 官方文档):
+- 原生支持 OpenAI(gpt-5 / gpt-4 / o3)
+- 内置 Amazon Bedrock provider
+- 原生支持任意 OpenAI-compatible API,via `~/.codex/config.toml` 的 `[model_providers.<id>]` 块
+- 例:OpenRouter / Mistral / Ollama / LM Studio / 自建 proxy
+
+**§5 整章重写**:
+- §5.0 集成策略 — Codex 全套机制复用(MCP / approval / compaction / 多模型 / session)
+- §5.1 Codex app-server JSON-RPC 客户端(~150 行)
+- §5.2 Codex provider 配置示例(`~/.codex/config.toml`)
+- §5.3 v0.11 Pi vs v0.12 Codex 对比表
+
+**关键让步**:多模型配置从"Conductor 层"移到"Codex config.toml 层"。用户改自己的 `~/.codex/config.toml`,Conductor 不参与。
+
+**§13 Phase 1**:
+- 集成代码量:`~30 行` → `~150 行`(Codex JSON-RPC 客户端比 Pi SDK 包装代码多)
+- 时间估算:`~2 周` → `~2-3 周`
+- Pi 集成代码删除,Codex 集成代码新增
+
+**§16 决策表更新**:
+- Provider 策略:Pi deep integration → Codex + OpenRouter
+- Conductor 范围:Pi 之上 → Codex 之上
+- 新增决策:Provider 配置入口 = `~/.codex/config.toml`(用户标准 Codex 配置)
+
+**§15 弱点更新**:
+- 第 13 条 Pi 风险**删除**(不再用 Pi)
+- 新增第 13 条 OpenRouter 风险(代理稳定性)
+- 新增第 14 条 Codex config.toml 维护责任(版本兼容)
 
 ### v0.10 → v0.11(本次更新 — Pi 深度集成,完全去掉 Claude)
 
