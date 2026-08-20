@@ -290,24 +290,55 @@ func NewIsolatedHome(provider, runID string) (*IsolatedHome, error) {
     iso := &IsolatedHome{
         Dir: filepath.Join(conductorHome(), "runs", runID, "home"),
     }
+    // **v0.8 优化**:auth 链到共享 $CONDUCTOR_HOME/.auth/ 而不是用户 HOME
+    // → 所有 run 共享一个 auth 源 → 单一重置点
+    authDir := filepath.Join(conductorHome(), ".auth")
     switch provider {
     case "claude":
-        // ~/.claude.json(OAuth + 设置)→ 软链(跟用户配置实时同步)
         iso.AuthLinks = append(iso.AuthLinks, AuthLink{
             Provider: "claude",
-            Target:   filepath.Join(userHome(), ".claude.json"),
+            Target:   filepath.Join(authDir, ".claude.json"),      // ← .auth 里的 symlink(指向用户)
             Link:     filepath.Join(iso.Dir, ".claude.json"),
         })
         // ~/.claude/(session + logs)→ 不软链,在隔离 HOME 里新建
     case "codex":
         iso.AuthLinks = append(iso.AuthLinks, AuthLink{
             Provider: "codex",
-            Target:   filepath.Join(userHome(), ".codex", "auth.json"),
+            Target:   filepath.Join(authDir, "codex", "auth.json"), // ← .auth/codex/auth.json
             Link:     filepath.Join(iso.Dir, ".codex", "auth.json"),
         })
     }
     return iso, nil
 }
+
+// 新增 $CONDUCTOR_HOME/.auth/ 管理
+func EnsureAuthDir() error {
+    authDir := filepath.Join(conductorHome(), ".auth")
+    if err := os.MkdirAll(authDir, 0700); err != nil { return err }
+
+    // 首次 init:把用户 HOME 的 auth 文件链入 .auth/
+    claudeAuth := filepath.Join(authDir, ".claude.json")
+    if _, err := os.Lstat(claudeAuth); os.IsNotExist(err) {
+        if _, err := os.Stat(filepath.Join(userHome(), ".claude.json")); err == nil {
+            _ = os.Symlink(filepath.Join(userHome(), ".claude.json"), claudeAuth)
+        }
+    }
+    // codex 同理
+    codexAuthDir := filepath.Join(authDir, "codex")
+    _ = os.MkdirAll(codexAuthDir, 0700)
+    codexAuth := filepath.Join(codexAuthDir, "auth.json")
+    if _, err := os.Lstat(codexAuth); os.IsNotExist(err) {
+        userCodexAuth := filepath.Join(userHome(), ".codex", "auth.json")
+        if _, err := os.Stat(userCodexAuth); err == nil {
+            _ = os.Symlink(userCodexAuth, codexAuth)
+        }
+    }
+    return nil
+}
+
+// CLI 命令
+//   conductor init      → 首次跑,建 .auth/
+//   conductor auth reset → rm -rf .auth/(完全脱离用户 auth)
 
 func (h *IsolatedHome) Setup() error {
     if err := os.MkdirAll(h.Dir, 0700); err != nil { return err }
@@ -343,12 +374,13 @@ cmd.Dir = spec.WorktreePath()
 
 | 决策 | 理由 |
 |---|---|
-| **Per-run 隔离**(不是 per-session) | 同一 task 的多次 turn 共享 HOME,session 找得到 |
-| **Symlink auth 文件**(不 copy) | 跟用户 OAuth 实时同步;用户撤销 auth 后下次 read 即生效 |
-| **隔离 session / logs / MCP config** | Conductor 产生的状态,不该污染用户 |
+| **Per-run 隔离 HOME**(不是 per-session) | 同一 task 的多次 turn 共享 HOME,session 找得到 |
+| **Symlink auth 到 `$CONDUCTOR_HOME/.auth/`**(不是用户 HOME) | **v0.8 优化**——auth 单一来源,易重置,不依赖用户 auth 路径 |
+| **Symlink .auth/ 里的文件到用户 HOME** | 默认仍跟用户 OAuth 实时同步 |
+| **隔离 session / logs / MCP config** | Conductor 产生的状态,不该污染用户,也不该 run 间互窜 |
 | **位置:`$CONDUCTOR_HOME/runs/<runId>/home/`** | 与 WorkflowState 同生命周期;debug 易找 |
 | **权限 0700** | auth token 敏感 |
-| **默认保留 Cleanup**(不删) | 便于 inspect session JSONL;CLI `--prune` 时清 |
+| **默认保留 Cleanup**(不删) | 便于 inspect session JSONL;`conductor prune --run <id>` 时清 |
 
 #### 6.2.4 边界与副作用
 
@@ -392,16 +424,74 @@ func (c *SubprocessClient) Close(ctx context.Context) error {
 - §6.2:Conductor 通过隔离 HOME 给 provider 一个"干净沙箱",**但 auth 共享**
 - 两者正交:一个是行为约束,一个是环境约束
 
+#### 6.2.8 v0.8 优化:共享 `.auth/` 目录(替代 v0.7 直链用户 HOME)
+
+> v0.7 设计每 run symlink auth 到用户 HOME——会有 N 个 symlink 指向同一文件,v0.8 引入中间层 `$CONDUCTOR_HOME/.auth/`。
+
+**对比**:
+
+```
+v0.7 (per-run symlink → user home):
+$CONDUCTOR_HOME/runs/run1/home/.claude.json → ~/.claude.json
+$CONDUCTOR_HOME/runs/run2/home/.claude.json → ~/.claude.json
+$CONDUCTOR_HOME/runs/run3/home/.claude.json → ~/.claude.json
+...(N 个 symlink 到同一文件)
+
+v0.8 (per-run symlink → shared .auth):
+$CONDUCTOR_HOME/.auth/.claude.json → ~/.claude.json  (1 个 symlink)
+$CONDUCTOR_HOME/runs/run1/home/.claude.json → $CONDUCTOR_HOME/.auth/.claude.json
+$CONDUCTOR_HOME/runs/run2/home/.claude.json → $CONDUCTOR_HOME/.auth/.claude.json
+$CONDUCTOR_HOME/runs/run3/home/.claude.json → $CONDUCTOR_HOME/.auth/.claude.json
+```
+
+**为什么更好**:
+- **Auth 单一来源**:`.auth/` 是 Conductor 唯一关心的 auth 位置
+- **重置简单**:`conductor auth reset` = `rm -rf $CONDUCTOR_HOME/.auth/`,再 `conductor init` 重建
+- **可切断与用户 auth 关联**:Phase 2 可加 `conductor auth copy-from-user`,把 symlink 换成真实 copy,Conductor 独立管 auth
+- **更易备份**:备份 Conductor auth = 备份 `$CONDUCTOR_HOME/.auth/`
+
+**磁盘影响**:
+- v0.7:每 run 1 个 auth symlink(~100B),100 run = 10KB
+- v0.8:1 个 `.auth/` symlink + 每 run 1 个 auth symlink(基本同 v0.7)
+- **实际差异微乎其微**,真正的价值是**清晰的管理边界**
+
+**完整目录结构**:
+
+```
+$CONDUCTOR_HOME/
+├── .auth/                          ← 共享 auth(v0.8 新增)
+│   ├── .claude.json    → ~/.claude.json  (symlink)
+│   └── codex/auth.json  → ~/.codex/auth.json (symlink)
+├── runs/
+│   ├── <runId-1>/
+│   │   ├── state.json
+│   │   ├── timeline.ndjson
+│   │   ├── blobs/
+│   │   └── home/
+│   │       ├── .claude.json    → $CONDUCTOR_HOME/.auth/.claude.json
+│   │       └── .claude/projects/...   (per-run sessions)
+│   └── <runId-2>/
+│       └── home/
+│           └── ...
+```
+
+**为什么仍 per-run session/logs**:
+- 两个 run 在同一 cwd → 同一 project hash → session 文件名不同(用 session ID),但 logs / settings 文件会冲突
+- per-run 隔离 → 零冲突 + 一刀切清理 + 易 debug
+
 #### 6.2.7 e2e 测试
 
 | 测试 ID | 场景 | 期望 |
 |---|---|---|
-| `T_isolated_home_created` | spawn Claude Code | `$CONDUCTOR_HOME/runs/<runId>/home/.claude.json` 是 symlink,`~/.claude/projects/` 是新 dir |
+| `T_isolated_home_created` | spawn Claude Code | `$CONDUCTOR_HOME/runs/<runId>/home/.claude.json` 是 symlink(指向 `.auth/`),`~/.claude/projects/` 是新 dir |
 | `T_no_user_pollution` | run 完成后 | 用户 `~/.claude/` 无新增 session/log |
-| `T_auth_via_symlink` | 用户 OAuth 改后,Conductor 新 run | 新 run 用新 auth(因为 symlink) |
-| `T_cleanup` | `conductor prune --run <runId>` | 隔离 HOME 被删除 |
+| `T_auth_via_symlink` | 用户 OAuth 改后,Conductor 新 run | 新 run 用新 auth(通过 .auth/ 链) |
+| `T_auth_reset` | `conductor auth reset` | `.auth/` 被删,下次 run 自动重建 |
+| `T_cleanup` | `conductor prune --run <runId>` | 隔离 HOME 被删除,.auth/ 保留 |
 | `T_concurrent_runs` | 同时跑 3 个 task | 各自隔离 HOME,session 互不可见 |
 | `T_xdg_respected` | spawn 检查 env | `HOME` / `XDG_*` 都正确覆盖 |
+
+
 
 
 
@@ -1484,7 +1574,7 @@ DELETE /v1/runs/<runId>?force=true            # 立即
 
 11. **过度工程风险(自我警告)** —— "Player registry" / "Multi-host Hub" / "Seamless migration" 这些概念**容易被术语诱惑**(Multica 是团队协作平台所以需要这些,但 Conductor 是 dev 工具,用户场景不同)。v0.5 已自我修正砍掉 Hub/Migration,但 Phase 2+ 设计时仍要警惕:**新术语新抽象不要堆砌,先问"99% 用户场景真的需要吗?"**
 
-## 16. 已确认的关键决策(v0.7)
+## 16. 已确认的关键决策(v0.8)
 
 | 决策点 | 选定方案 | 章节 |
 |---|---|---|
@@ -1878,6 +1968,34 @@ type ACPParser struct{ /* 与 Codex 同,但方法名是 ACP 规范的 */ }
 ---
 
 ## 版本变更
+
+### v0.7 → v0.8(本次更新 — 共享 .auth/ 目录优化)
+
+**用户问题**:"为啥每 run 一个 HOME dir,不能 claude code 全部共享一个吗?"
+**诚实回答**:
+- 完全共享一个 HOME 在技术上可行,但**会丢失 5 件事**:per-run 状态隔离、简单清理、调试隔离、并发 run 不打架、settings 不冲突——所以**不是优化,是反模式**。
+- 真正的优化是**共享 auth 目录**(`.auth/`)+ per-run session/logs 目录。v0.8 引入 `$CONDUCTOR_HOME/.auth/` 作为 auth 单一来源。
+
+**§6.2.2 设计修订**:
+- `NewIsolatedHome` 中 auth symlink target 从 `~/.claude.json` 改为 `$CONDUCTOR_HOME/.auth/.claude.json`
+- `.auth/` 里的文件才是指向用户 HOME 的 symlink(单层,所有 run 共享)
+
+**新增 §6.2.8 共享 .auth/ 优化**:
+- 完整目录结构对比图
+- 4 个优势(单一来源 / 重置简单 / 可切断关联 / 易备份)
+- 磁盘影响分析(实际差异微乎其微,价值是清晰管理边界)
+- 为什么 session/logs 仍 per-run
+
+**新增 `EnsureAuthDir()` + CLI 命令**:
+- `conductor init` → 首次建 `.auth/`
+- `conductor auth reset` → 清 `.auth/` 重建
+- (Phase 2+) `conductor auth copy-from-user` → symlink 换 copy
+
+**§6.2.3 决策表更新**:决策 "Symlink auth 到 .auth/" 替代 "Symlink auth 到用户 HOME"
+
+**§6.2.7 e2e 测试新增**:T_auth_reset(`.auth/` 被删后下次 run 重建)
+
+**§16 决策表**:维持"Subprocess 环境隔离"决策(§6.2 引用更新)
 
 ### v0.6 → v0.7(本次更新 — Subprocess HOME 隔离,Phase 1 必做)
 
