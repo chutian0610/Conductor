@@ -93,26 +93,29 @@ conductor/
 └─ README.md
 ```
 
-**子命令形态**(Go 单 binary):
+**子命令形态**(TS monorepo,单 daemon binary):
 ```bash
 conductor daemon                  # 启动 Player Daemon(默认前台)
 conductor daemon --hub            # 启动 Player Hub(跨 host 注册中心)
-conductor run claude "implement auth"     # CLI:通过 daemon 起 agent
+conductor run "implement auth"    # CLI:通过 daemon 起 agent(默认 Pi,可指定)
 conductor ls                       # CLI:列本地 agents
 conductor cancel <runId>          # CLI:取消(对应 §14)
-conductor workflow ./my.json     # CLI:启动工作流
+conductor workflow ./my.json      # CLI:启动工作流
+conductor auth init/reset         # CLI:管理 .auth/(§6.2)
+conductor init                    # CLI:首次跑,建 $CONDUCTOR_HOME/.auth/
 ```
 
-**为何 Go 单 binary**:
-- 一份发行,无 Node 版本/依赖陷阱
-- `conductor daemon|hub|cli` 同进程共用 protocol/runner/storage 代码
-- webui 完全独立部署(可以独立 npm install + build)
+**为何 TS 单栈**:
+- 一个语言、一份类型(从 protocol 到 webui)
+- **直接 fork Paseo TS 代码**(Paseo 是 TS,同语言)——这是 v0.9 选 TS 的最大动机
+- 直接用 Pi SDK / Claude Agent SDK
+- `npm i -g conductor` 跟 `brew install` 一样方便
+- 代价:需要 Node runtime(>= 18);失去单 binary(放弃这个 trade-off 可接受)
 
-**为何 protocol 用 JSON Schema 共享**:
-- Go:用 `invopop/jsonschema` 注解 struct,导出 schema(Phase 1);或反向从 schema 生成 struct
-- TS:`json-schema-to-typescript` 从 schema 生成 types
-- Phase 1 简化:hand-written Go structs + hand-written Zod schemas,CI 断言 wire format 一致
-- Phase 2:引入 codegen 流水线
+**为何 protocol 共享**:
+- TS:`zod` schema 单一来源,server + webui 都从同一 schema 引用
+- Phase 1 简化:hand-written Zod schemas,server 和 webui 都用
+- Phase 2+:从 Zod 派生 OpenAPI 给 webui fetch wrapper
 
 ## 4. Agent Spec — 一个 agent 的全部静态定义
 
@@ -153,51 +156,71 @@ type AgentSpec = {
 
 ## 5. Agent Provider 层
 
-### 5.1 抽象接口(Go 版)
+### 5.1 抽象接口(TypeScript 版)
 
-```go
-// internal/protocol/provider.go —— 跨 provider 抽象
+```typescript
+// packages/protocol/src/provider.ts —— 跨 provider 抽象
 
-type AgentProvider string   // "claude" | "codex" | "pi" | "omp" | "acp:<vendor>" | "custom:<id>"
+export type AgentProvider =
+  | "pi" | "claude" | "codex" | "omp"
+  | `acp:${string}`     // 任意 ACP agent
+  | `custom:${string}`; // 自定义
 
-type AgentClient interface {
-    Provider() AgentProvider
-    Capabilities() AgentCapabilityFlags
+export interface AgentClient {
+  readonly provider: AgentProvider;
+  readonly capabilities: AgentCapabilityFlags;
 
-    CreateSession(ctx context.Context, cfg AgentSessionConfig,
-        launch *AgentLaunchContext, opts *AgentCreateSessionOptions) (AgentSession, error)
-    ResumeSession(ctx context.Context, handle AgentPersistenceHandle,
-        overrides *AgentSessionConfig, launch *AgentLaunchContext) (AgentSession, error)
-    FetchCatalog(ctx context.Context, opts FetchCatalogOptions) (ProviderCatalog, error)
-    IsAvailable(ctx context.Context) (bool, error)
+  createSession(
+    config: AgentSessionConfig,
+    launch?: AgentLaunchContext,
+    opts?: AgentCreateSessionOptions,
+    signal?: AbortSignal,         // ← §14 取消入口
+  ): Promise<AgentSession>;
 
-    // 可选:导入历史会话
-    ListImportableSessions(ctx context.Context, opts *ListImportableSessionsOptions) ([]ImportableProviderSession, error)
-    ImportSession(ctx context.Context, input ImportProviderSessionInput,
-        ctx2 ImportProviderSessionContext) (ImportedProviderSession, error)
+  resumeSession(
+    handle: AgentPersistenceHandle,
+    overrides?: Partial<AgentSessionConfig>,
+    launch?: AgentLaunchContext,
+    signal?: AbortSignal,
+  ): Promise<AgentSession>;
+
+  fetchCatalog(opts: FetchCatalogOptions, signal?: AbortSignal): Promise<ProviderCatalog>;
+  isAvailable(signal?: AbortSignal): Promise<boolean>;
+
+  // 可选:导入历史会话
+  listImportableSessions?(opts?: ListImportableSessionsOptions, signal?: AbortSignal): Promise<ImportableProviderSession[]>;
+  importSession?(input: ImportProviderSessionInput, ctx: ImportProviderSessionContext, signal?: AbortSignal): Promise<ImportedProviderSession>;
 }
 
-type AgentSession interface {
-    ID() string
-    Provider() AgentProvider
-    // 同步发送(单轮)
-    Send(ctx context.Context, prompt AgentPrompt, opts *SendOptions) (AgentTurnResult, error)
-    // 流式订阅(多轮 event channel)
-    Events() <-chan AgentStreamEvent
-    // 取消当前 turn(对应 §14)
-    Cancel(ctx context.Context) error
-    // 回滚上一轮
-    Rewind(ctx context.Context, opts *RewindOptions) error
-    // 持久化句柄(崩溃后 resume)
-    Persist(ctx context.Context) (AgentPersistenceHandle, error)
-    // 关闭(必须清理 subprocess)
-    Close(ctx context.Context) error
+export interface AgentSession {
+  readonly id: string;
+  readonly provider: AgentProvider;
+
+  send(prompt: AgentPrompt, opts?: SendOptions, signal?: AbortSignal): Promise<AgentTurnResult>;
+
+  // 流式订阅(多 turn event stream)
+  events(): AsyncIterable<AgentStreamEvent>;
+
+  // §14 取消
+  cancel(signal?: AbortSignal): Promise<void>;
+  rewind(opts?: RewindOptions, signal?: AbortSignal): Promise<void>;
+  persist(signal?: AbortSignal): Promise<AgentPersistenceHandle>;
+  close(signal?: AbortSignal): Promise<void>;
 }
 ```
 
-> 这是 Paseo `AgentClient` + `AgentSession` 双层契约的 Go 直译。`context.Context` 一等公民贯穿所有 API——这是 Go 版本相对 TS 的**核心收益**:`ctx.Done()` 就是 §14 的取消信号源。
+> **v0.9 关键变更**:取消原语从 `context.Context` 改为 **`AbortSignal`**(Node 原生)。所有 API 接收 `signal?: AbortSignal`,消费端:
 >
-> `Events() <-chan AgentStreamEvent` 取代 TS 的 `AsyncIterable`——消费端 `for ev := range sess.Events() { ... }` 配合 `select { case <-ctx.Done(): ... }` 处理取消。
+> ```typescript
+> for await (const ev of session.events()) {
+>   if (signal.aborted) break;
+>   // 处理 ev
+> }
+> ```
+>
+> `AbortController` 多源合并(`AbortSignal.any([user, hub, workflow])`)是 §14 三路合一在 Node 下的答案。
+>
+> **Pi-first 集成**:第 5.2 节会展示为什么 Pi SDK 让"一个 provider = 20+ 模型"。
 
 ### 5.2 Provider 实现分类(三种接入策略)
 
@@ -1378,8 +1401,9 @@ Phase 2:
   - registry/ 进程内注册表
   - worktree/ 自动隔离
   - cancellation/ §14 协议落地 + 单 host e2e
-  - **Hub as dispatcher(§10.2 新语义)** —— 多 host 分发不同 task
-  - **Provider 扩展** —— 加 Codex/Pi(每个 provider 独立 SessionRef,per-host)
+  - **Hub as dispatcher(§10.2)** —— 多 host 分发不同 task
+  - **Provider 扩展** —— + Claude SDK(escape hatch,Pi 不够时用)
+  - 可选 + Codex / Omp / ACP-generic
 
 Phase 3:
   - provider/ 扩到 3+ provider(Codex、Paseo ACP 类);迁移能力按 provider 扩展
@@ -1631,29 +1655,29 @@ DELETE /v1/runs/<runId>?force=true            # 立即
 
 11. **过度工程风险(自我警告)** —— "Player registry" / "Multi-host Hub" / "Seamless migration" 这些概念**容易被术语诱惑**(Multica 是团队协作平台所以需要这些,但 Conductor 是 dev 工具,用户场景不同)。v0.5 已自我修正砍掉 Hub/Migration,但 Phase 2+ 设计时仍要警惕:**新术语新抽象不要堆砌,先问"99% 用户场景真的需要吗?"**
 
-## 16. 已确认的关键决策(v0.8)
+## 16. 已确认的关键决策(v0.9)
 
 | 决策点 | 选定方案 | 章节 |
 |---|---|---|
-| Server 语言栈 | **Go**(单 binary,Daemon/Hub/CLI 同进程;context.Context 原生支持 §14) | §0, §17 |
-| WebUI 语言栈 | **JS** (Next.js 14 App Router + React 18),Phase 1 后启动 | §3 |
+| Server 语言栈 | **TypeScript/Node.js**(单栈;AbortController 原生支持 §14) | §0, §17 |
+| WebUI 语言栈 | **TypeScript/Next.js 14** | §3 |
 | Phase 1 形态 | **本地优先**(local-first),单 host daemon,Paseo 模型;无 Hub | §10 |
-| Phase 1 provider | **单 provider**:Claude Code only(v1 不支持 Codex/Pi/ACP) | §5 |
+| Phase 1 provider 策略 | **Pi-first**:`@earendil-works/pi-coding-agent` SDK → 20+ 模型 day-1 | §5.2 |
+| Phase 2+ provider | 加 Claude SDK(escape hatch)+ 其他直接集成 | §5.2 |
 | 多 host task 模型 | **task 不跨机器**;Hub(Phase 2+)= dispatcher,分发不同 task 给不同 host | §10.2 |
 | 跨 host session 迁移 | **彻底不做**(用户决策 v0.6) | §10.4 ~~删除~~ |
 | "无缝"边界 | **彻底不做**(用户决策 v0.6) | §10.5 ~~删除~~ |
-| Phase 2+ provider | 加新 provider 时新增实现,interface 不变;跨 provider 翻译暂不做 | §12.11 |
-| **Subprocess 环境隔离** | **Per-run 隔离 HOME + Auth symlink**;Phase 1 必做,防 session 污染与配置冲突 | §6.2 |
-| Workflow 引擎 | **A. 自研轻量软工作流引擎**(否掉 Temporal/Restate 重方案,否掉 prompt-only 退化) | §8.6 |
-| Player registry | **多 host Hub**(进程内 + 跨 host 注册中心) | §10.2 |
-| 持久化默认 | **文件 JSON + SQLite 一等切换**(运行时可切,wire schema 不变) | §11.1 |
 | 跨 provider 子 agent | **不做**,agent 间对等(peer) | §6.1 |
 | Provider 内部 subagent | **不干预**,纯观测 | §6.1 |
+| **Subprocess 环境隔离** | **Per-run 隔离 HOME + Auth symlink**;Phase 1 必做,防 session 污染与配置冲突 | §6.2 |
+| Workflow 引擎 | **A. 自研轻量软工作流引擎**(否掉 Temporal/Restate 重方案,否掉 prompt-only 退化) | §8.6 |
+| Player registry | **多 host Hub**(进程内 + 跨 host 注册中心,Phase 2+) | §10.2 |
+| 持久化默认 | **文件 JSON + SQLite 一等切换**(better-sqlite3,运行时可切) | §11.1 |
 | Context 跨步骤 | **强类型 StageSpec + Ref offload + Zod 校验** | §12 |
-| Protocol 共享 | **JSON Schema 单一来源**,Go structs + Zod 双写 + CI 等价断言(Phase 1);codegen(Phase 2) | §17.2 D7 |
+| Protocol 共享 | **Zod 单一来源**(server + webui 都引用同 schema) | §17.2 D7 |
 | 长上下文策略 | **4 层分层**:Ref / 声明式 reads / agent retrieve / provider 摘要 | §12.10 |
-| Workflow 阶段 | **软工作流 + 语义标签**:PDCA(Plan→Do→Check→**Apply**)是默认预设,非强制;可扩展 GSD、自定义 phases | §8 |
-| 取消协议 | **三路合一**:Hub / 用户 / workflow 自身 → 同一 signal,三阶段生命周期 | §14 |
+| Workflow 阶段 | **软工作流 + 语义标签**:PDCA(Plan→Do→Check→**Apply**)是默认预设,非强制 | §8 |
+| 取消协议 | **三路合一**:Hub / 用户 / workflow 自身 → AbortSignal.any([...]) | §14 |
 | Web UI | Phase 1 不出,Phase 3+ 可选 | §9.1 |
 
 仍待确认的非阻塞项(实施时再定):
@@ -2025,6 +2049,43 @@ type ACPParser struct{ /* 与 Codex 同,但方法名是 ACP 规范的 */ }
 ---
 
 ## 版本变更
+
+### v0.8 → v0.9(本次更新 — Server 改 Node.js,Provider 改 Pi-first)
+
+**用户决策**(双 pivot):
+- ✅ Server:**TypeScript/Node.js**(原 Go)
+- ✅ Provider 策略:**Pi-first**(1 个 provider = 20+ 模型),Claude SDK 作 escape hatch
+
+**为何 v0.9 选 TS**:
+- 直接用 `@earendil-works/pi-coding-agent` SDK(避免手写 JSON-RPC)
+- 直接用 `@anthropic-ai/claude-agent-sdk`(escape hatch)
+- 直接 fork Paseo TS 代码(同语言,最大加速点)
+- npm 生态丰富(`ws`, `zod`, `fastify`, `@modelcontextprotocol/sdk`)
+- 取消原语 `AbortController` / `AbortSignal` 完美映射 §14 协议
+
+**Pi-first 影响**:
+- Phase 1 从"单 provider (Claude only)"→ "Pi only" = 20+ 模型 day-1
+- Phase 1 时间估算从 6-8 周 → **~2 周**(SDK 包装比 Go 手写 RPC 快 3 倍)
+- Phase 2+ 仍可加 direct Claude / Codex(escape hatch)
+
+**§3 仓库布局重写**:
+- 旧: `server/`(Go) + `webui/`(JS) + `shared/`
+- 新: `packages/`(TS monorepo)+ `apps/{daemon,web}`(TS)
+- 单一语言,`pnpm-workspace.yaml` 一个 root
+
+**§5.1 AgentClient/AgentSession 改 TS 版**:
+- 取消从 `context.Context` → `AbortSignal?(可选参数)`
+- 流式从 `Events() <-chan` → `events(): AsyncIterable`
+- §14 三路合一:`AbortSignal.any([userSignal, hubSignal, workflowSignal])`
+
+**§13 路线图更新**:
+- Phase 1: "Go + Claude only (6-8 周)" → "TS + Pi SDK (~2 周)"
+- Phase 2: 加 Claude SDK 作 escape hatch
+
+**§16 决策表更新**:
+- Server 语言栈:Go → TypeScript/Node.js
+- Phase 1 provider 策略:Claude only → Pi-first
+- Phase 2+ provider:Claude SDK(escape hatch)+ 其他
 
 ### v0.7 → v0.8(本次更新 — 共享 .auth/ 目录优化)
 
