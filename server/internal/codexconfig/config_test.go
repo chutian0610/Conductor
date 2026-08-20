@@ -230,3 +230,72 @@ env_key = "EXAMPLE_KEY"
 		t.Errorf("EnvKey = %q, want EXAMPLE_KEY (from $CODEX_HOME)", pc.EnvKey)
 	}
 }
+
+// TestParseWireAPIAndRequiresOpenAIAuth covers the MiniMax-style
+// custom-provider block (no OpenAI account, custom base URL +
+// wire protocol). These two fields are the gate for whether
+// codex app-server attempts ChatGPT OAuth at all.
+func TestParseWireAPIAndRequiresOpenAIAuth(t *testing.T) {
+	src := []byte(`
+[model_providers.minimax]
+name = "MiniMax"
+base_url = "http://127.0.0.1:8000/v1"
+env_key = "MINIMAX_API_KEY"
+wire_api = "responses"
+requires_openai_auth = false
+`)
+	got, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	pc := got["minimax"]
+	if pc.WireAPI != "responses" {
+		t.Errorf("WireAPI = %q, want responses", pc.WireAPI)
+	}
+	if pc.RequiresOpenAIAuth == nil {
+		t.Fatalf("RequiresOpenAIAuth = nil, want &false")
+	}
+	if *pc.RequiresOpenAIAuth {
+		t.Errorf("*RequiresOpenAIAuth = true, want false")
+	}
+}
+
+// TestParseRequiresOpenAITrue covers the inverse case where the
+// provider DOES need OpenAI OAuth.
+func TestParseRequiresOpenAITrue(t *testing.T) {
+	src := []byte(`
+[model_providers.openai]
+base_url = "https://api.openai.com/v1"
+env_key = "OPENAI_API_KEY"
+requires_openai_auth = true
+`)
+	got, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	pc := got["openai"]
+	if pc.RequiresOpenAIAuth == nil {
+		t.Fatalf("RequiresOpenAIAuth = nil, want &true")
+	}
+	if !*pc.RequiresOpenAIAuth {
+		t.Errorf("*RequiresOpenAIAuth = false, want true")
+	}
+}
+
+// TestParseRequiresOpenAIAuthUnset covers the case where the
+// field is absent — should remain nil so we don't write a
+// false default into the per-spec config.
+func TestParseRequiresOpenAIAuthUnset(t *testing.T) {
+	src := []byte(`
+[model_providers.openai]
+base_url = "https://api.openai.com/v1"
+env_key = "OPENAI_API_KEY"
+`)
+	got, err := Parse(src)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got["openai"].RequiresOpenAIAuth != nil {
+		t.Errorf("RequiresOpenAIAuth = %v, want nil (unset)", *got["openai"].RequiresOpenAIAuth)
+	}
+}

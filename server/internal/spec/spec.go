@@ -46,6 +46,19 @@ type CreateInput struct {
 	// EnvKey is the name of the env var that holds the API key
 	// (e.g. "OPENAI_API_KEY"). Empty for local providers (Ollama).
 	EnvKey string
+
+	// WireAPI selects the wire protocol ("responses" or "chat").
+	// "" means we don't write the field, so Codex picks its default.
+	// Most OpenAI-compatible custom providers should set this to
+	// "responses" to match the Codex app-server protocol.
+	WireAPI string
+
+	// RequiresOpenAIAuth is the auth gate. Nil = unset (Codex's
+	// own default applies, typically true for OpenAI-style
+	// providers). False = opt out of ChatGPT OAuth and rely on
+	// the provider's own API key (from EnvKey). Required for
+	// custom providers like MiniMax that have no OpenAI account.
+	RequiresOpenAIAuth *bool
 }
 
 // CreateResult is what Create returns on success.
@@ -113,7 +126,13 @@ func Create(ctx context.Context, in CreateInput) (CreateResult, error) {
 
 	// Set up the per-spec HOME.
 	iso := home.New(specId, string(in.Spec.Provider))
-	if err := iso.Setup(in.BaseURL, in.EnvKey, authSourcePath); err != nil {
+	if err := iso.Setup(home.SetupConfig{
+		BaseURL:            in.BaseURL,
+		EnvKey:             in.EnvKey,
+		WireAPI:            in.WireAPI,
+		RequiresOpenAIAuth: in.RequiresOpenAIAuth,
+		AuthSourcePath:     authSourcePath,
+	}); err != nil {
 		return CreateResult{}, fmt.Errorf("setup HOME: %w", err)
 	}
 

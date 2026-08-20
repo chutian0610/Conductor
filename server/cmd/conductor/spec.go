@@ -137,8 +137,10 @@ Flags:
 			ToolsExclude: f.ToolsExclude,
 			Cwd:          f.Cwd,
 		},
-		BaseURL: pc.BaseURL,
-		EnvKey:  pc.EnvKey,
+		BaseURL:            pc.BaseURL,
+		EnvKey:             pc.EnvKey,
+		WireAPI:            pc.WireAPI,
+		RequiresOpenAIAuth: pc.RequiresOpenAIAuth,
 	}
 	if f.Worktree != "" {
 		in.Spec.Worktree = &protocol.WorktreeSpec{

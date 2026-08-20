@@ -438,3 +438,48 @@ func TestCreateOverwriteUnsafe(t *testing.T) {
 		t.Errorf("session file should still exist after refused overwrite: %v", err)
 	}
 }
+
+// TestCreateWritesWireAPIAndAuth verifies the end-to-end flow:
+// spec.Create with WireAPI + RequiresOpenAIAuth=false on the
+// input lands them in the per-spec config.toml. This is the
+// MiniMax custom-provider scenario — codex app-server needs to
+// see both fields to skip ChatGPT OAuth and use the Responses
+// protocol.
+func TestCreateWritesWireAPIAndAuth(t *testing.T) {
+	resetConductorHome(t)
+	ctx := context.Background()
+
+	noAuth := false
+	res, err := Create(ctx, CreateInput{
+		Spec: protocol.AgentSpec{
+			Provider: protocol.ProviderCodex,
+			Model:    "MiniMax-Text-01",
+			Name:     "minimax-custom",
+		},
+		BaseURL:            "http://127.0.0.1:8000/v1",
+		EnvKey:             "MINIMAX_API_KEY",
+		WireAPI:            "responses",
+		RequiresOpenAIAuth: &noAuth,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cfg, err := os.ReadFile(res.Record.ConfigToml)
+	if err != nil {
+		t.Fatalf("read config.toml: %v", err)
+	}
+	body := string(cfg)
+	for _, want := range []string{
+		`model_provider = "codex"`,
+		`[model_providers.codex]`,
+		`base_url = "http://127.0.0.1:8000/v1"`,
+		`env_key = "MINIMAX_API_KEY"`,
+		`wire_api = "responses"`,
+		`requires_openai_auth = false`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("config.toml missing %q:\n%s", want, body)
+		}
+	}
+}

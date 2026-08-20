@@ -15,7 +15,7 @@ func TestIsolatedHomeSetupWritesConfigToml(t *testing.T) {
 	t.Setenv("CONDUCTOR_HOME", t.TempDir())
 
 	h := New("claude-opus-planner", "openrouter")
-	if err := h.Setup("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", ""); err != nil {
+	if err := h.Setup(SetupConfig{BaseURL: "https://openrouter.ai/api/v1", EnvKey: "OPENROUTER_API_KEY"}); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 
@@ -54,7 +54,7 @@ func TestIsolatedHomeSetupWithoutAuth(t *testing.T) {
 	t.Setenv("CONDUCTOR_HOME", t.TempDir())
 
 	h := New("local-llama", "ollama")
-	if err := h.Setup("http://localhost:11434/v1", "", ""); err != nil {
+	if err := h.Setup(SetupConfig{BaseURL: "http://localhost:11434/v1"}); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 	data, err := os.ReadFile(h.ConfigTomlPath())
@@ -75,7 +75,7 @@ func TestIsolatedHomeRemove(t *testing.T) {
 	t.Setenv("CONDUCTOR_HOME", t.TempDir())
 
 	h := New("delete-me", "openai")
-	if err := h.Setup("https://api.openai.com/v1", "OPENAI_API_KEY", ""); err != nil {
+	if err := h.Setup(SetupConfig{BaseURL: "https://api.openai.com/v1", EnvKey: "OPENAI_API_KEY"}); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 	if _, err := os.Stat(h.HomeDir()); err != nil {
@@ -86,5 +86,82 @@ func TestIsolatedHomeRemove(t *testing.T) {
 	}
 	if _, err := os.Stat(h.HomeDir()); !os.IsNotExist(err) {
 		t.Errorf("HOME should be gone after Remove, got err = %v", err)
+	}
+}
+
+// TestIsolatedHomeSetupWritesWireAPIAndAuth verifies the per-spec
+// HOME config.toml reflects the MiniMax-style custom provider
+// fields: wire_api = "responses" + requires_openai_auth = false.
+// These two together tell codex app-server "skip ChatGPT OAuth,
+// use the Responses protocol against this non-OpenAI endpoint".
+func TestIsolatedHomeSetupWritesWireAPIAndAuth(t *testing.T) {
+	t.Setenv("CONDUCTOR_HOME", t.TempDir())
+	h := New("minimax-planner", "minimax")
+	noAuth := false
+	if err := h.Setup(SetupConfig{
+		BaseURL:            "http://127.0.0.1:8000/v1",
+		EnvKey:             "MINIMAX_API_KEY",
+		WireAPI:            "responses",
+		RequiresOpenAIAuth: &noAuth,
+	}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	body, err := os.ReadFile(h.ConfigTomlPath())
+	if err != nil {
+		t.Fatalf("read config.toml: %v", err)
+	}
+	for _, want := range []string{
+		`wire_api = "responses"`,
+		`requires_openai_auth = false`,
+		`env_key = "MINIMAX_API_KEY"`,
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("config.toml missing %q:\n%s", want, body)
+		}
+	}
+}
+
+// TestIsolatedHomeSetupOmitsRequiresOpenAIAuthWhenNil verifies
+// that nil RequiresOpenAIAuth means "do not write the field".
+// This matters because Codex's default is requires_openai_auth=true
+// (ChatGPT OAuth), and we don't want to silently flip providers
+// like openrouter into "no OAuth" mode just because the user
+// didn't set the field.
+func TestIsolatedHomeSetupOmitsRequiresOpenAIAuthWhenNil(t *testing.T) {
+	t.Setenv("CONDUCTOR_HOME", t.TempDir())
+	h := New("openrouter-planner", "openrouter")
+	if err := h.Setup(SetupConfig{
+		BaseURL: "https://openrouter.ai/api/v1",
+		EnvKey:  "OPENROUTER_API_KEY",
+		// RequiresOpenAIAuth deliberately left nil.
+	}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	body, err := os.ReadFile(h.ConfigTomlPath())
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if strings.Contains(string(body), "requires_openai_auth") {
+		t.Errorf("config.toml should not write requires_openai_auth when nil:\n%s", body)
+	}
+}
+
+// TestIsolatedHomeSetupOmitsWireAPIWhenEmpty verifies wire_api is
+// not written when empty (Codex picks its default).
+func TestIsolatedHomeSetupOmitsWireAPIWhenEmpty(t *testing.T) {
+	t.Setenv("CONDUCTOR_HOME", t.TempDir())
+	h := New("openrouter-planner", "openrouter")
+	if err := h.Setup(SetupConfig{
+		BaseURL: "https://openrouter.ai/api/v1",
+		EnvKey:  "OPENROUTER_API_KEY",
+	}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	body, err := os.ReadFile(h.ConfigTomlPath())
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if strings.Contains(string(body), "wire_api") {
+		t.Errorf("config.toml should not write wire_api when empty:\n%s", body)
 	}
 }

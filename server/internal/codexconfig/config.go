@@ -30,6 +30,21 @@ type ProviderConfig struct {
 	// (e.g. "OPENROUTER_API_KEY"). Empty for local providers
 	// (Ollama, embedded proxies) that don't need an API key.
 	EnvKey string
+
+	// WireAPI selects the wire protocol for the provider
+	// ("responses" or "chat"; "" means Codex default). Codex
+	// app-server requires Responses for custom providers that
+	// claim OpenAI compatibility at the Responses endpoint —
+	// see codex-rs/app-server README.
+	WireAPI string
+
+	// RequiresOpenAIAuth is the auth gate. False means codex
+	// app-server skips the ChatGPT OAuth step entirely and uses
+	// the provider's own auth (typically the API key from
+	// EnvKey). Nil means the field is unset in the user's
+	// config.toml and we should leave it out of the per-spec
+	// HOME config — so Codex's own default (true, OAuth) applies.
+	RequiresOpenAIAuth *bool
 }
 
 // ErrProviderNotFound is returned by Resolve when the requested
@@ -156,6 +171,11 @@ func Parse(data []byte) (map[string]ProviderConfig, error) {
 			current.BaseURL = s
 		case "env_key":
 			current.EnvKey = s
+		case "wire_api":
+			current.WireAPI = s
+		case "requires_openai_auth":
+			b := s == "true"
+			current.RequiresOpenAIAuth = &b
 		}
 		// Re-store the local copy into the map so external readers
 		// see the updated fields.

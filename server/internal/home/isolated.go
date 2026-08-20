@@ -54,18 +54,45 @@ func (h *IsolatedHome) HomeDir() string { return h.homeDir }
 // config.toml was written.
 func (h *IsolatedHome) ConfigTomlPath() string { return h.configToml }
 
+// SetupConfig is the parameter bundle for to IsolatedHome.Setup.
+// It captures everything the per-spec HOME config.toml needs to
+// know about the resolved provider block.
+type SetupConfig struct {
+	// BaseURL is the API endpoint for this provider.
+	BaseURL string
+
+	// EnvKey is the name of the env var that holds the API key
+	// (e.g. "MINIMAX_API_KEY"). Empty for providers that don't
+	// need an API key (Ollama, embedded local proxies).
+	EnvKey string
+
+	// WireAPI selects the wire protocol ("responses" or "chat";
+	// "" means we don't write the field, Codex picks its default).
+	// Most OpenAI-compatible custom providers that implement the
+	// Responses API should set "responses" here.
+	WireAPI string
+
+	// RequiresOpenAIAuth gates the ChatGPT OAuth step. Nil means
+	// unset (Codex default applies, which is typically true for
+	// OpenAI / openrouter). False explicitly opts out of OAuth,
+	// letting the provider's own API key (from EnvKey) be used
+	// directly. Required for custom providers like MiniMax that
+	// don't have an OpenAI account.
+	RequiresOpenAIAuth *bool
+
+	// AuthSourcePath is where the per-provider auth lives in
+	// $CONDUCTOR_HOME/.auth/<provider>/. Empty skips the auth
+	// symlink (used by providers that don't need an API key).
+	AuthSourcePath string
+}
+
 // Setup prepares the HOME directory: creates it with 0700, writes
 // config.toml, symlinks the per-provider auth file into HOME.
 //
-// baseURL and envKey come from the resolved [model_providers.<id>]
-// block in the user's ~/.codex/config.toml. Conductor reads that
-// file, picks the right provider, and hands us the values.
-//
-// The authSourcePath is where the per-provider auth lives in
-// $CONDUCTOR_HOME/.auth/<provider>/. If empty, the auth symlink is
-// skipped (used by providers that don't need an API key, like
-// Ollama or an already-authenticated local proxy).
-func (h *IsolatedHome) Setup(baseURL, envKey, authSourcePath string) error {
+// The fields come from the resolved [model_providers.<id>] block
+// in the user's ~/.codex/config.toml. Conductor reads that file,
+// picks the right provider, and hands us the values.
+func (h *IsolatedHome) Setup(cfg SetupConfig) error {
 	if err := os.MkdirAll(filepath.Join(h.homeDir, ".codex"), 0o700); err != nil {
 		return fmt.Errorf("mkdir HOME: %w", err)
 	}
@@ -79,10 +106,16 @@ model_provider = %q
 [model_providers.%s]
 name = %q
 base_url = %q
-`, h.provider, h.provider, h.provider, baseURL)
-	if envKey != "" {
+`, h.provider, h.provider, h.provider, cfg.BaseURL)
+	if cfg.EnvKey != "" {
 		// Empty env_key means "provider doesn't need an API key".
-		toml += fmt.Sprintf("env_key = %q\n", envKey)
+		toml += fmt.Sprintf("env_key = %q\n", cfg.EnvKey)
+	}
+	if cfg.WireAPI != "" {
+		toml += fmt.Sprintf("wire_api = %q\n", cfg.WireAPI)
+	}
+	if cfg.RequiresOpenAIAuth != nil {
+		toml += fmt.Sprintf("requires_openai_auth = %t\n", *cfg.RequiresOpenAIAuth)
 	}
 
 	if err := os.WriteFile(h.configToml, []byte(toml), 0o600); err != nil {
@@ -90,10 +123,10 @@ base_url = %q
 	}
 
 	// Symlink the per-provider auth file. Skip if none configured.
-	if authSourcePath == "" {
+	if cfg.AuthSourcePath == "" {
 		return nil
 	}
-	if _, err := os.Stat(authSourcePath); err != nil {
+	if _, err := os.Stat(cfg.AuthSourcePath); err != nil {
 		// Source doesn't exist yet — that's fine, the symlink would
 		// dangle. Skip; the user can populate it via `conductor auth
 		// init <provider>` later.
@@ -102,7 +135,7 @@ base_url = %q
 	// Codex reads ~/.codex.json (NOT inside .codex/) for auth on
 	// some installs. We symlink at the HOME root.
 	linkPath := filepath.Join(h.homeDir, ".codex.json")
-	if err := os.Symlink(authSourcePath, linkPath); err != nil && !os.IsExist(err) {
+	if err := os.Symlink(cfg.AuthSourcePath, linkPath); err != nil && !os.IsExist(err) {
 		return fmt.Errorf("symlink auth: %w", err)
 	}
 	return nil
