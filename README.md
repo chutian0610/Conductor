@@ -56,6 +56,23 @@ Fields Conductor reads:
 Unknown fields are silently ignored — Codex adds fields over time
 and we want forward compatibility.
 
+### What Conductor does NOT do (by design)
+
+- **No wire-protocol adapter.** If your upstream only speaks
+  Chat Completions but you need Codex to send Responses
+  requests, that's your problem to solve out-of-band. Common
+  options: run [LiteLLM](https://github.com/BerriAI/litellm) as
+  a local sidecar that exposes an OpenAI-compatible Responses
+  endpoint, or write a tiny proxy. Conductor's `base_url` just
+  points at whatever you set up.
+
+  This is a deliberate scope cut: writing a Responses↔Chat
+  Completions proxy is a small but real project of its own
+  (streaming, function-calling translations, tool-use shape
+  mismatches, etc.) and Conductor shouldn't be in the business
+  of competing with LiteLLM. The five fields above are all we
+  read; everything else is "your upstream's problem".
+
 ### Common configurations
 
 **OpenAI direct** — built-in fallback, no config needed:
