@@ -110,6 +110,21 @@ func (s *JsonFileStorage) GetRun(ctx context.Context, runID string) (*RunState, 
 	return &state, nil
 }
 
+// LookupSessionID is a convenience that returns the Codex thread
+// id from a prior run's state.json. Used by
+// `conductor run --resume-run <runId>` to translate a run
+// reference into the sessionId codex needs for thread/resume.
+func (s *JsonFileStorage) LookupSessionID(ctx context.Context, runID string) (string, error) {
+	state, err := s.GetRun(ctx, runID)
+	if err != nil {
+		return "", err
+	}
+	if state.SessionID == "" {
+		return "", ErrSessionIDMissing
+	}
+	return state.SessionID, nil
+}
+
 // ListRuns returns every run under runs/, newest first, applying
 // filter. Orphan directories (no state.json) are silently skipped
 // — they're half-aborted writes that the next prune pass should

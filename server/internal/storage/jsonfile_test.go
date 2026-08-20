@@ -419,3 +419,50 @@ func TestAtomicStateWriteCrashSafety(t *testing.T) {
 		t.Errorf("state.json doesn't look right: %s", buf.String())
 	}
 }
+
+// TestLookupSessionIDHappyPath verifies the resume-by-runId
+// helper returns the recorded sessionId.
+func TestLookupSessionIDHappyPath(t *testing.T) {
+	s, _ := setupStorage(t)
+	ctx := context.Background()
+	if _, err := s.CreateRun(ctx, "rt", "spec", "p"); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if err := s.UpdateRun(ctx, "rt", func(rs *RunState) {
+		rs.SessionID = "thr-abc"
+		rs.Status = RunStatusCompleted
+	}); err != nil {
+		t.Fatalf("UpdateRun: %v", err)
+	}
+	got, err := s.LookupSessionID(ctx, "rt")
+	if err != nil {
+		t.Fatalf("LookupSessionID: %v", err)
+	}
+	if got != "thr-abc" {
+		t.Errorf("sessionId = %q, want thr-abc", got)
+	}
+}
+
+// TestLookupSessionIDMissing covers runs without a sessionId
+// (still running, or failed before turn/completed).
+func TestLookupSessionIDMissing(t *testing.T) {
+	s, _ := setupStorage(t)
+	ctx := context.Background()
+	if _, err := s.CreateRun(ctx, "norun", "spec", "p"); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	// Status=running, SessionID="".
+	_, err := s.LookupSessionID(ctx, "norun")
+	if !errors.Is(err, ErrSessionIDMissing) {
+		t.Errorf("err = %v, want ErrSessionIDMissing", err)
+	}
+}
+
+// TestLookupSessionIDNotFound covers unknown runId.
+func TestLookupSessionIDNotFound(t *testing.T) {
+	s, _ := setupStorage(t)
+	_, err := s.LookupSessionID(context.Background(), "ghost")
+	if !errors.Is(err, ErrRunNotFound) {
+		t.Errorf("err = %v, want ErrRunNotFound", err)
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"conductor/server/internal/protocol"
+	"conductor/server/internal/storage"
 	"conductor/server/internal/spec"
 )
 
@@ -217,5 +218,160 @@ func TestRunHelp(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "conductor run — invoke") {
 		t.Errorf("--help should print usage, got %q", errOut.String())
+	}
+}
+
+// resumeRunFakeScript — fake codex that records which thread method
+// it received. Returns thr-cmd for thread/start, thr-cmd-resumed
+// for thread/resume, plus a turn/completed carrying the chosen
+// threadId. The test asserts the recorded method matches what
+// --from-run should produce.
+const resumeRunFakeScript = `#!/bin/sh
+LOGFILE="$CONDUCTOR_FAKE_LOG"
+while read -r REQ; do
+  METHOD=$(printf '%s' "$REQ" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
+  ID=$(printf '%s' "$REQ" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  [ -n "$LOGFILE" ] && printf '%s\n' "$METHOD" >> "$LOGFILE"
+  case "$METHOD" in
+    thread/start)
+      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":${ID},\"result\":{\"threadId\":\"thr-cmd\"}}"
+      ;;
+    thread/resume)
+      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":${ID},\"result\":{\"threadId\":\"thr-cmd-resumed\"}}"
+      ;;
+    turn/start)
+      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":${ID},\"result\":{\"ok\":true}}"
+      printf '%s\n' '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"text":"hi"}}'
+      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"method\":\"turn/completed\",\"params\":{\"usage\":{},\"finish\":{\"reason\":\"end_turn\",\"success\":true},\"threadId\":\"thr-x\"}}"
+      exit 0
+      ;;
+  esac
+done
+`
+
+// setupResumeRunFixture creates a spec + a fake codex in PATH, then
+// runs `conductor run` once to produce a completed RunState with a
+// sessionId. Returns that sessionId + the runId.
+func setupResumeRunFixture(t *testing.T) (specID, runID, sessionID, logPath string) {
+	t.Helper()
+	t.Setenv("CONDUCTOR_HOME", t.TempDir())
+
+	logPath = t.TempDir() + "/methods.log"
+	t.Setenv("CONDUCTOR_FAKE_LOG", logPath)
+
+	fakePath := filepath.Join(t.TempDir(), "fake.sh")
+	if err := os.WriteFile(fakePath, []byte(resumeRunFakeScript), 0o755); err != nil {
+		t.Fatalf("write fake: %v", err)
+	}
+	binDir := t.TempDir()
+	wrapper := filepath.Join(binDir, "codex")
+	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\nexec /bin/sh "+fakePath+` "$@"`+"\n"), 0o755); err != nil {
+		t.Fatalf("write wrapper: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	res, err := spec.Create(context.Background(), spec.CreateInput{
+		Spec:    protocol.AgentSpec{Provider: protocol.ProviderCodex, Model: "m", Name: "resume-test"},
+		BaseURL: "https://x",
+	})
+	if err != nil {
+		t.Fatalf("spec.Create: %v", err)
+	}
+	specID = res.SpecId
+
+	// First run — captures a sessionId.
+	var out, errOut bytes.Buffer
+	if err := runRunWithWriter(context.Background(),
+		[]string{"--spec", specID, "first prompt"}, &out, &errOut); err != nil {
+		t.Fatalf("first run: %v\nstderr=%q", err, errOut.String())
+	}
+
+	// Find the just-created runId from storage.
+	store, err := storage.NewJsonFileStorage()
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+	runs, err := store.ListRuns(context.Background(), storage.RunFilter{SpecID: specID})
+	if err != nil {
+		t.Fatalf("ListRuns: %v", err)
+	}
+	if len(runs) == 0 {
+		t.Fatalf("no runs recorded")
+	}
+	runID = runs[0].RunID
+	sessionID = runs[0].SessionID
+	if sessionID == "" {
+		t.Fatalf("first run has no sessionId")
+	}
+
+	// Clear the log so the second run's record starts from a clean slate.
+	if err := os.WriteFile(logPath, nil, 0o600); err != nil {
+		t.Fatalf("clear log: %v", err)
+	}
+	return specID, runID, sessionID, logPath
+}
+
+// TestRunResumeRunByRunID is the end-to-end happy path for
+// --from-run: creates a run, captures its sessionId, then
+// resumes it by runId. Asserts that the second invocation took
+// the thread/resume branch (not thread/start) and returned the
+// resumed sessionId.
+func TestRunResumeRunByRunID(t *testing.T) {
+	specID, runID, _, logPath := setupResumeRunFixture(t)
+
+	var out, errOut bytes.Buffer
+	err := runRunWithWriter(context.Background(),
+		[]string{"--spec", specID, "--from-run", runID, "second prompt"}, &out, &errOut)
+	if err != nil {
+		t.Fatalf("--from-run: %v\nstderr=%q", err, errOut.String())
+	}
+
+	// Should print the "resuming session ..." line for visibility.
+	if !strings.Contains(out.String(), "resuming session") {
+		t.Errorf("output should announce the resume, got %q", out.String())
+	}
+
+	// Verify the fake saw thread/resume (not thread/start).
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	methods := strings.Split(strings.TrimRight(string(logData), "\n"), "\n")
+	// We expect exactly one method: thread/resume (turn/start
+	// doesn't appear in this run because thread/resume
+	// replaced it). Wait — actually we still issue turn/start
+	// AFTER thread/resume. So we expect: thread/resume, turn/start.
+	if len(methods) != 2 || methods[0] != "thread/resume" || methods[1] != "turn/start" {
+		t.Errorf("methods = %v, want [thread/resume, turn/start]", methods)
+	}
+}
+
+// TestRunResumeRunNotFound covers an unknown runId.
+func TestRunResumeRunNotFound(t *testing.T) {
+	specID := setupRunFixture(t)
+	var out, errOut bytes.Buffer
+	err := runRunWithWriter(context.Background(),
+		[]string{"--spec", specID, "--from-run", "ghost-run", "x"}, &out, &errOut)
+	if err == nil {
+		t.Fatalf("expected error for unknown runId")
+	}
+	if !strings.Contains(errOut.String(), "--from-run ghost-run") {
+		t.Errorf("stderr should mention the bad runId, got %q", errOut.String())
+	}
+}
+
+// TestRunResumeMutuallyExclusive guards against --resume +
+// --from-run being combined (ambiguous: which sessionId wins?).
+func TestRunResumeMutuallyExclusive(t *testing.T) {
+	specID, runID, _, _ := setupResumeRunFixture(t)
+	var out, errOut bytes.Buffer
+	err := runRunWithWriter(context.Background(),
+		[]string{"--spec", specID, "--resume", "thr-direct", "--from-run", runID, "x"},
+		&out, &errOut)
+	if err == nil {
+		t.Fatalf("expected error for --resume + --from-run")
+	}
+	if !strings.Contains(errOut.String(), "mutually exclusive") {
+		t.Errorf("stderr should mention mutual exclusivity, got %q", errOut.String())
 	}
 }

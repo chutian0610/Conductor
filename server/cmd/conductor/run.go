@@ -2,6 +2,7 @@
 //
 //	conductor run --spec <id> [prompt]
 //	conductor run --spec <id> --resume <sessionId> [prompt]
+//	conductor run --spec <id> --from-run <runId> [prompt]
 //
 // One-shot invocation: opens a codex Session against the spec's
 // per-spec HOME, sends the prompt, streams events to stdout, and
@@ -35,7 +36,8 @@ func runRunWithWriter(ctx context.Context, args []string, stdout, stderr io.Writ
 	fs := cli.NewFlagSet("conductor run")
 	f := &runFlags{}
 	fs.StringVar(&f.Spec, "spec", "", "spec id to invoke")
-	fs.StringVar(&f.Resume, "resume", "", "session id to resume (routes to thread/resume instead of thread/start)")
+	fs.StringVar(&f.Resume, "resume", "", "session id to resume (raw threadId; routes to thread/resume)")
+	fs.StringVar(&f.FromRun, "from-run", "", "runId to resume (looks up the prior run's sessionId from storage)")
 	fs.BoolVar(&f.JSON, "json", false, "stream events as JSON lines (machine-readable)")
 	fs.BoolVar(&f.Quiet, "quiet", false, "suppress event streaming; only print final result")
 
@@ -45,6 +47,7 @@ func runRunWithWriter(ctx context.Context, args []string, stdout, stderr io.Writ
 Usage:
   conductor run --spec <id> [prompt]
   conductor run --spec <id> --resume <sessionId> [prompt]
+  conductor run --spec <id> --from-run <runId> [prompt]
 
 Flags:
 `)
@@ -68,8 +71,12 @@ Flags:
 	if fs.NArg() > 0 {
 		prompt = fs.Arg(0)
 	}
-	if prompt == "" && f.Resume == "" {
-		fmt.Fprintln(stderr, "error: prompt argument required (or use --resume to continue an existing session)")
+	if f.Resume != "" && f.FromRun != "" {
+		fmt.Fprintln(stderr, "error: --resume and --from-run are mutually exclusive")
+		return errors.New("--resume and --from-run are mutually exclusive")
+	}
+	if prompt == "" && f.Resume == "" && f.FromRun == "" {
+		fmt.Fprintln(stderr, "error: prompt argument required (or use --resume / --from-run to continue an existing session)")
 		return errors.New("prompt required")
 	}
 
@@ -84,9 +91,22 @@ Flags:
 	}
 	runID := storage.NewRunID()
 
+	// If --from-run <runId> was given, translate it to a
+	// sessionId first (looked up from the prior run's state.json).
+	sessionID := f.Resume
+	if f.FromRun != "" {
+		sid, lookupErr := store.LookupSessionID(ctx, f.FromRun)
+		if lookupErr != nil {
+			fmt.Fprintf(stderr, "error: --from-run %s: %s\n", f.FromRun, lookupErr)
+			return lookupErr
+		}
+		sessionID = sid
+		fmt.Fprintf(stdout, "resuming session %s (from run %s)\n", sid, f.FromRun)
+	}
+
 	var result *protocol.AgentTurnResult
-	if f.Resume != "" {
-		result, err = runner.InvokeWithSessionId(ctx, f.Spec, f.Resume, prompt, runID, store, handler)
+	if sessionID != "" {
+		result, err = runner.InvokeWithSessionId(ctx, f.Spec, sessionID, prompt, runID, store, handler)
 	} else {
 		result, err = runner.Invoke(ctx, f.Spec, prompt, runID, store, handler)
 	}
@@ -108,10 +128,11 @@ Flags:
 }
 
 type runFlags struct {
-	Spec   string
-	Resume string
-	JSON   bool
-	Quiet  bool
+	Spec      string
+	Resume    string // raw threadId (advanced / copy-paste from logs)
+	FromRun string // runId (typical UX — references a prior run)
+	JSON      bool
+	Quiet     bool
 }
 
 // buildEventPrinter returns an EventHandler that formats events

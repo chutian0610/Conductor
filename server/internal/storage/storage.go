@@ -59,6 +59,11 @@ type RunFilter struct {
 // skipped, see §6.2.5 migration story).
 var ErrRunNotFound = errors.New("storage: run not found")
 
+// ErrSessionIDMissing is returned by LookupSessionID when the
+// run exists but has no sessionId recorded. Typical when the
+// run is still in flight, or failed before turn/completed.
+var ErrSessionIDMissing = errors.New("storage: run has no sessionId yet")
+
 // NewRunID returns a fresh 16-hex-char run id backed by
 // crypto/rand. Two consecutive calls produce different ids with
 // negligible collision probability (~2^-64).
@@ -93,6 +98,16 @@ type Storage interface {
 	// GetRun reads state.json for runID. Returns ErrRunNotFound
 	// if the run doesn't exist.
 	GetRun(ctx context.Context, runID string) (*RunState, error)
+
+	// LookupSessionID is a thin convenience that returns the
+	// Codex thread id stored on a completed run. Used by
+	// `conductor run --resume-run <runId>` to translate a run
+	// reference into the sessionId codex needs for thread/resume.
+	// Returns ErrRunNotFound if runID is unknown, or
+	// ErrSessionIDMissing if the run exists but didn't record a
+	// sessionId (still running, failed before turn/completed, or
+	// the provider didn't populate one).
+	LookupSessionID(ctx context.Context, runID string) (string, error)
 
 	// ListRuns returns every RunState matching filter, sorted
 	// newest-first. Orphan runs (no state.json) are skipped.
@@ -146,6 +161,9 @@ func (NoopStorage) CreateRun(ctx context.Context, runID, specID, prompt string) 
 }
 func (NoopStorage) GetRun(context.Context, string) (*RunState, error) {
 	return nil, ErrRunNotFound
+}
+func (NoopStorage) LookupSessionID(context.Context, string) (string, error) {
+	return "", ErrRunNotFound
 }
 func (NoopStorage) ListRuns(context.Context, RunFilter) ([]RunState, error) {
 	return nil, nil
