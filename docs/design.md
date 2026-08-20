@@ -11,6 +11,26 @@ Conductor 是一个 **本地常驻的 Player Daemon**,把 Claude Code / Codex / 
 
 Conductor **不**自研 LLM agent 框架,**不**训练模型,**不**做模型路由优化。它只做"宿主 + 编排 + 观测"。
 
+## 0.5 版本决策记录(v0.12.1 锁定)
+
+**当前定论(2026-08)**:
+- Backend:**Node.js 单栈**(Paseo 同语言,SDK / fork 优势)
+- Provider:**Codex only + OpenRouter 配置**(OpenAI 维护 + OpenAI-compatible 协议)
+- Spec 模型:**per-spec HOME**(spec 创建时写 config.toml,invoke 共享)
+- HOME 隔离:`$CONDUCTOR_HOME/specs/<specId>/home/` per spec
+- 取消协议:`AbortController` 三路合一
+- 不做:**跨 host session migration** / **"无缝"边界** / **跨 provider 子 agent**
+
+**v0.12.1 决策 — 后端锁定 Node.js**:
+考虑过"Codex + Pi combo 时是否改回 Go",结论**保留 Node.js**,理由:
+- Node 路线 provider 适配 ~150 行(Pi SDK / Codex SDK 直接 import)
+- Go 路线 ~350 行(两个手写 JSON-RPC)
+- Node 编辑即跑,Go 需 compile
+- Node 生态契合(MCP SDK / zod / ws / fastify 直接用)
+- 后悔成本低:Phase 4+ 真要 Go,接口已预留
+
+Go 不是不能用,只是**这次保留 Node.js**。
+
 ## 1. 竞品对照(已落到代码的事实)
 
 | 维度 | Paseo | Multica | Conductor (拟) |
