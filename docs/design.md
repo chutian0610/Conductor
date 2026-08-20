@@ -1,6 +1,6 @@
-# Conductor — 多 Agent 协作服务 设计方案 (v0.2)
+# Conductor — 多 Agent 协作服务 设计方案 (v0.3)
 
-> 状态: 草案(v0.2)。v0.1 → v0.2 主要变化见末尾"版本变更"。本仓库刚刚创建,本文件是第一份设计记录。所有架构决策以"对照 Paseo / Multica 真实代码 + 用户原始分层"为依据,后续讨论请直接编辑本文件或在 Issue 中附 diff。
+> 状态: 草案(v0.3)。v0.1 → v0.2 → v0.3 主要变化见末尾"版本变更"。本仓库刚刚创建,本文件是第一份设计记录。所有架构决策以"对照 Paseo / Multica 真实代码 + 用户原始分层"为依据,后续讨论请直接编辑本文件或在 Issue 中附 diff。
 
 ## 0. 一句话定位
 
@@ -277,42 +277,114 @@ type NodeResult = {
 
 Worker 是"图节点类型系统",Workflow 引擎是"动态生成图 + 跑 PDCA 循环"——见 §8。
 
-## 8. Agent Workflow 层 —— PDCA 周期与动态子任务
+## 8. Agent Workflow 层 —— 软工作流与阶段标签
 
-用户原始需求里写"**每阶段动态生成 worker task,PDCA 循环**"。这是 Conductor 与 Paseo 最大差异点:
+> **v0.3 重要修正**:PDCA 在这里是**任务阶段的语义标签**(Plan → Do → Check → **Apply**),**不是** Deming 质量循环的硬状态机。它更接近 gsd 这类"软工作流":每个阶段有目标与交付物,但阶段之间的顺序与重复由 agent 自主决定。**PDCA 只是默认 phase 集,不是唯一形态——用户可自定义更多阶段**(如 design / verify / ship / release)。
 
+Conductor 与 Paseo 最大差异仍然成立:
 - Paseo 把编排完全交给父 LLM,父 agent 用 Task tool 触发子 agent(纯 prompt 层)。
-- Conductor 需要一个**显式的 PDCA 引擎**,原因是用户期望"每阶段动态生成 worker task"——也就是说,**子任务结构是程序生成的,不是 LLM 自由发挥的**。
+- Conductor 需要一个**显式的阶段调度引擎**,原因是用户期望"每阶段动态生成 worker task"——**子任务结构是程序化生成的,phase name 是结构化标签,不是 LLM 自由发挥**。
 
-### 8.1 PDCA 阶段模型
-
-```
-Plan  →  Check  →  Do  →  Act
- ▲                            │
- └────────────────────────────┘
-       (until criteria met)
-```
-
-每个阶段是一个 NodeRef,阶段之间通过显式 `gate`(布尔表达式 + 超时)切换。
-
-### 8.2 动态子任务生成
+### 8.1 Stage / Phase 模型
 
 ```ts
+type PhaseName = string;   // 任意语义标签,默认:"plan" | "do" | "check" | "apply",可扩展
+
 interface WorkflowStage {
-  name: "plan" | "do" | "check" | "act" | string;
-  planner: (prev: StageOutput[]) => Promise<NodeRef>;  // 关键:动态生成下一阶段图
-  gate?: { expr: Expr; timeoutMs?: number };
+  name: PhaseName;                                  // 阶段语义标签
+  input:  ZodSchema<unknown>;                        // 接受 inputs / 之前 stages 输出
+  output: ZodSchema<unknown>;                        // 落盘前校验
+  run(ctx: StageContext): Promise<unknown>;          // 同 StageSpec,但强调 phase 语义
+  // 可选:软门禁
+  skipIf?: Expr;                                     // 表达式为真则跳过该 phase
   retries?: number;
+  gate?: { expr: Expr; timeoutMs?: number };         // 进入下一 phase 前的软门禁
+}
+```
+
+关键点:
+- **阶段顺序不强制**:`Workflow.phases` 是有序数组,但 `phase[i]` 可以根据 `ctx.prev` 跳回 `phase[j]`(软循环)。
+- **阶段可重复**:同 phase 可在一次 run 中出现多次(如 plan → do → check → apply → plan → do,这是合规的 PDCA 多轮)。
+- **阶段可扩展**:用户可在 spec 里加 `phases: ["design", "plan", "do", "verify", "ship", "release"]`,无需改引擎。
+
+### 8.2 PDCA 默认预设(Plan → Do → Check → Apply)
+
+```ts
+const PDCA_PRESET: WorkflowStage[] = [
+  { name: "plan",  output: PlanOutputSchema,  run: planStage  },
+  { name: "do",    output: DoOutputSchema,    run: doStage    },
+  { name: "check", output: CheckOutputSchema, run: checkStage },
+  { name: "apply", output: ApplyOutputSchema, run: applyStage },
+];
+```
+
+> 注意是 **Apply**(应用变更),不是古典 Deming 里的 Act(根据结果行动)。在软件场景下 Apply 更精确——"apply the change/improvement"。
+
+阶段间关系(示意,**非强制**):
+
+```
+  plan ──→ do ──→ check ──→ apply
+   ▲                            │
+   └────────────────────────────┘
+       (可选:check 不通过则回到 plan 或 do)
+```
+
+门禁示例(默认全开,可覆盖):
+- `do`:可跳过(某些 task 不需要执行)
+- `check`:必跑,失败则回到 `do`(默认)或 `plan`(可选)
+- `apply`:必跑;失败则终止 run
+
+### 8.3 GSD 风格预设(示例:Research → Spec → Build → Verify → Ship)
+
+```ts
+const GSD_PRESET: WorkflowStage[] = [
+  { name: "research", output: ResearchOutputSchema, run: researchStage },  // 读 codebase
+  { name: "spec",     output: SpecOutputSchema,     run: specStage     },  // 写 spec
+  { name: "build",    output: BuildOutputSchema,    run: buildStage    },  // 实现
+  { name: "verify",   output: VerifyOutputSchema,   run: verifyStage   },  // 跑测试 / 静态检查
+  { name: "ship",     output: ShipOutputSchema,     run: shipStage     },  // commit / PR
+];
+```
+
+GSD 与 PDCA 的差别:
+- **research 先于 plan**:不熟悉 codebase 时先调研
+- **spec 是显式阶段**:交付物是结构化 spec(可被存档、引用)
+- **verify 与 check 不同**:verify 跑真实测试/lint,check 是逻辑/可行性 review
+- **ship 是终点**:一次性,失败不回退(用户介入)
+
+### 8.4 自定义阶段
+
+用户可声明任意 phase name,无需改引擎。例如:
+```ts
+conductor run --workflow ./my-workflow.json
+// my-workflow.json:
+// {
+//   "phases": ["design", "implement", "review", "release"],
+//   "stages": {
+//     "design":    { "input": ..., "output": ..., "run": "designStage" },
+//     ...
+//   }
+// }
+```
+
+引擎只负责:`phases[i] → phases[i+1]` 调度、阶段间 ctx 传递、persistence、cancellation。**它不规定"phases 必须是 PDCA"**。
+
+### 8.5 动态阶段生成(planner)
+
+```ts
+interface WorkflowSpec {
+  phases: WorkflowStage[];                          // 静态 phase 集
+  planner?: (ctx: WorkflowContext) => Promise<NodeRef>;  // 可选:动态生成下一个 NodeRef
 }
 ```
 
 > 这是 Conductor 与"硬编码图引擎"的差别:**计划本身是 LLM/procedure 调用**,但执行图是结构化数据。LLM 只负责"算下一阶段要做什么",执行仍然走 Worker 层。
 
-### 8.3 PDCA 实现选项(技术选型,见 §12 问题清单)
+### 8.6 实现选项(技术选型)
 
 | 选项 | 描述 | 优点 | 缺点 |
 |---|---|---|---|
-| A. 内置轻量引擎 | Conductor 自己实现 PDCA 调度器 | 无外部依赖、可控 | 需自己写调度/持久化/恢复 |
+| A. 内置轻量引擎 | Conductor 自己实现 phase 调度器 | 无外部依赖、可控 | 需自己写调度/持久化/恢复 |
 | B. 外部 Temporal / Restate | 借用成熟工作流引擎 | 持久化/恢复/可视化免费 | 引入重依赖,部署复杂 |
 | C. Prompt-only | 退化到 Paseo 模式 | 极简 | 不满足"动态生成 worker task"语义 |
 
@@ -596,6 +668,82 @@ interface WorkflowState {
 
 **关键边界:分支不能污染 ctx。** parallel 三分支跑完,join 后主 ctx 的 `prev` 只增"join step"一项,各分支的内部 stage 仍按名字可见——这给 planner 一个完整的"分支→分支内 stage→join"层次视图。
 
+### 12.10 长上下文策略分层(4 层,各司其职)
+
+> **v0.3 修正**:context 不是单一机制,而是**分层策略**——每层解决不同问题,跨层兜底。
+
+**Layer 0 — Ref 懒加载(Conductor 默认,always-on)**
+
+§12.5 的 Ref 系统就是这一层。provider 看到的 prompt 里只有 ref 标记(如 `<ref name="diff" file="/.../pr1.diff" />`),实际数据按需 fetch。**对所有 stage 启用,零成本,无限规模**。
+
+**Layer 1 — Workflow 级选择性传参(声明式)**
+
+Workflow spec 声明每个 stage 显式 read 哪些前驱 stage:
+```ts
+{
+  name: "do_pr1",
+  reads: ["plan", "check_feasibility"],   // 只有这两个 stage 的 output 进 prompt
+  // ...
+}
+```
+默认:仅读直接前驱。可声明空数组(`reads: []`)完全隔离;可声明 `"*"` 读全部(危险,需 confirm)。
+
+**Layer 2 — Agent 级按需 retrieve(agent 协作逻辑)**
+
+Conductor 给 agent 暴露一组工具:
+```ts
+// agent 可调用的 context 工具
+{
+  "conductor.context.get":    (stageName, refName) => Ref,
+  "conductor.context.list":   (filter) => StageSummary[],
+  "conductor.context.search": (query, scope?) => SearchHit[],   // 全文搜
+  "conductor.context.summary": (stageName, maxTokens?) => string, // 摘要
+}
+```
+
+Agent **自主决定**什么时候拉什么。这是"agent 协作逻辑"层——agent 比 workflow 更清楚"我现在需要看 plan 的哪一段"。
+
+**Layer 3 — Provider 层超阈值摘要(兜底)**
+
+当 agent 多轮对话超出 context window 时,**provider SDK** 自动启动摘要:
+- Claude Code / Codex 等已有自己的 summarization 机制
+- 这是 provider 私事,Conductor **不实现、不干预**
+- Conductor 只暴露 hooks:`onContextPressure(thresholdPct, action)`,provider 触发时回调
+
+**Layer 4 — Tiered memory(可选,长跑 workflow)**
+
+> 50+ stage 的工作流。Phase 4+ 才考虑。
+- Hot:最近 N 个 stage 完整保留
+- Cold:老 stage 摘要索引,可通过 `conductor.context.search` 检索
+- 触发条件:`stage count > tieredMemoryThreshold`(默认 30)
+
+**策略路由总览**:
+
+```
+┌──────────────────────────────────────────────────────┐
+│ Provider SDK 内部(兜底)                                │ Layer 3
+├──────────────────────────────────────────────────────┤
+│ Agent 工具调用(主动 retrieve)                          │ Layer 2
+├──────────────────────────────────────────────────────┤
+│ Workflow spec 声明(显式 reads)                         │ Layer 1
+├──────────────────────────────────────────────────────┤
+│ Ref 懒加载(标记 + 按需 fetch)                           │ Layer 0
+└──────────────────────────────────────────────────────┘
+```
+
+**各层关系**:
+- Layer 0 是地基,所有 stage 都自动启用
+- Layer 1 是默认推荐:workflow 编写者显式声明读取
+- Layer 2 是协作层:agent 在多层 context 中导航,需要 `conductor.context.*` 工具族
+- Layer 3 是兜底:当 Layer 0+1+2 都不够时,provider 自己的 summarization 顶上去
+- Layer 4 是长跑优化:Phase 4+
+
+**Phase 1/2 实现优先级**:
+- Phase 1:Layer 0(已有)+ Layer 1(spec 字段预留)
+- Phase 2:Layer 2(`conductor.context.*` 工具族实现)
+- Phase 2 末:Layer 3 适配(provider hook)
+- Phase 4+:Layer 4
+
 ---
 
 ## 13. 实施路线图
@@ -611,9 +759,10 @@ Phase 1 (MVP):
 
 Phase 2:
   - worker/ 5 种节点类型
-  - workflow/ PDCA 引擎(方案 A)
+  - workflow/ 软工作流引擎(自研,§8.6 方案 A)+ PDCA/GSD 默认预设
   - registry/ 进程内注册表
   - worktree/ 自动隔离
+  - cancellation/ §14 协议落地 + 跨 host e2e
 
 Phase 3:
   - provider/ Pi/OMP/ACP-generic(扩到 5+ provider)
@@ -621,10 +770,142 @@ Phase 3:
   - 更多编排原语(join 策略、loop 条件)
 
 Phase 4:
-  - Hub: 多 Daemon 注册与路由
+  - Hub: 多 Daemon 注册与路由 + HA
   - 可选 Web UI
   - 可选 Postgres 后端
+  - Tiered memory(Layer 4)
 ```
+
+## 14. Cancellation Protocol
+
+> **v0.3 新增**。多 host + 多 stage 并发 + provider 子进程,取消信号必须三路合一(Hub / 用户 / workflow 自身)且可恢复。
+
+### 14.1 取消来源
+
+| 来源 | 触发条件 | 优先级 |
+|---|---|---|
+| **用户** | CLI `cancel`、API `DELETE /v1/runs/:id`、WS 断开 | 最高(立即响应) |
+| **Hub** | host 失联、run 迁移、配额超限 | 高 |
+| **Workflow** | gate 超时、retry 耗尽、`loop.until` 命中 cancel、表达式求值为 cancel | 中 |
+| **Stage** | 依赖 stage 失败(在 parallel/sequence 中传播) | 低 |
+
+### 14.2 取消目标层级
+
+取消信号按依赖树向下传播:
+
+```
+workflow (cancelled)
+  └─ stage A (running)
+       └─ provider session (current turn)
+            └─ provider subprocess (CLI / app-server 进程)
+```
+
+**关键边界**:
+- **兄弟 stage 默认 fail-fast**:`parallel` 中一个分支被取消,其他分支也取消(默认 `cancelPolicy: "fail-fast"`)
+- **sequence 阶段一个失败,后续 skip**(而非 cancel,因为语义上是"前置失败")
+- **worktree 等副作用保留**——取消不删 worktree,留给用户/Hub 检查
+
+### 14.3 三阶段生命周期
+
+```
+active → cancelling → cancelled
+            │              │
+            └─→ cancel_failed (timeout 等不到 ack)
+```
+
+| 状态 | 含义 | 持续时间 |
+|---|---|---|
+| `active` | 正常运行 | — |
+| `cancelling` | 信号已发,等待 ack | ≤ `timeoutMs` |
+| `cancelled` | stage 已 ack,状态落盘 | 终态 |
+| `cancel_failed` | 超时未 ack,force-kill | 终态 |
+
+### 14.4 信号与超时
+
+```ts
+interface CancelOptions {
+  reason: "user" | "hub" | "workflow-gate" | "retry-exhausted"
+        | "loop-maxiter" | "dependency-failed" | "quota-exceeded";
+  timeoutMs: number;       // 默认 30000(grace period)
+  force: boolean;          // true → 立即 SIGKILL,跳过 grace
+}
+
+interface CancelResult {
+  status: "cancelled" | "cancel_failed";
+  cancelledAt: string;
+  reason: CancelOptions["reason"];
+  providerState: "resumable" | "lost";  // 取决于 provider 是否保留 persistence handle
+  forcedKill: boolean;
+}
+```
+
+`StageContext.signal` 是**单一取消入口**——三路信号合流。Stage 函数应监听 `signal` 并尽快返回。
+
+### 14.5 Provider 取消语义
+
+Stage 收到 cancel 后:
+1. `signal.abort()` 触发,Stage 函数应在 `timeoutMs` 内返回
+2. Conductor 调 `providerSession.cancel()`:
+   - Claude Code SDK → 中断当前 turn,保留 session
+   - Codex app-server → interrupt,保留 session
+   - ACP → 发 `cancel` notification,等 ack
+3. 若 provider 支持 `AgentPersistenceHandle`,persist 部分状态 → 下次可 resume
+4. Stage 标记 `status: "cancelled"`,落盘
+5. Ref 保留(不删)
+
+`timeoutMs` 到达后未 ack:
+1. Provider subprocess force-kill(SIGKILL)
+2. Stage 标记 `cancel_failed`
+3. Provider 状态标记 `lost`(无法 resume)
+4. Workflow 决定 retry / fail run
+
+### 14.6 取消传播策略
+
+```ts
+type CancelPolicy =
+  | { kind: "fail-fast" }                              // 取消兄弟 stage(parallel 默认)
+  | { kind: "continue-siblings" }                       // 兄弟继续跑(sequence 默认)
+  | { kind: "drain"; timeoutMs: number };              // 给兄弟 timeoutMs 收尾,然后取消
+```
+
+### 14.7 幂等性
+
+Stage 需要 `idempotencyKey`:
+- `idempotencyKey = "${runId}:${stageName}:${attempt}"`
+- 副作用(git commit、worktree、PR 创建)必须先 check key 再执行
+- Ref 用 sha256 命名天然幂等
+
+### 14.8 Hub 层取消
+
+Hub 检测到 host 失联(heartbeat 超时):
+1. Hub 向该 host 上的所有 stage 发 cancel 信号
+2. run 标记 `migrating`
+3. cancel ack 后(或 force-kill),Hub 选新 host
+4. 新 host 从 storage 读 `WorkflowState`,从 `cursor` 续跑
+5. cancelled stage 保持 `cancelled` 状态(默认不重跑)
+6. spec 可配置 `restartCancelled: boolean` → 重新跑被取消的 stage
+
+### 14.9 用户取消 UX
+
+```bash
+# CLI
+conductor cancel <runId>                      # 优雅取消
+conductor cancel <runId> --force              # 立即 SIGKILL
+conductor cancel <runId> --reason "user"      # 标记来源(用于 analytics)
+
+# HTTP
+DELETE /v1/runs/<runId>                       # 优雅
+DELETE /v1/runs/<runId>?force=true            # 立即
+```
+
+返回 202 Accepted + cancel 任务 ID;真正的 cancel 状态通过 `GET /v1/runs/:id` 或 WS 流查看。
+
+### 14.10 取消与持久化的关系
+
+- Cancel 信号发出后,stage 状态(`cancelling`)立即落盘
+- 即使 force-kill,WorkflowState 已写入 `cancelling`
+- 重启 Daemon 后可恢复 cancel 流程(避免"半取消"状态)
+- `schemaVersion` 必须支持 cancel 字段的演化
 
 ## 15. 设计不足 / 自我审视
 
@@ -636,7 +917,7 @@ Phase 4:
 
 3. **Provider-native subagent 的可见性差异** —— Claude Task 工具和 OMP task 工具产生的子 agent,我们通过 store 跟踪;但子 agent 的真实事件流受限于 provider SDK。Codex app-server 的子 agent 事件归一化成本可能不低。
 
-4. **Context 跨步骤传递** —— §12 已给出 StageSpec / StageContext / Ref 三件套,但"长上下文累积"(把 N 个 stage 的产出全塞给下一个 stage)仍受 provider context window 限制。Phase 2 需要落"超阈值自动摘要"或"按需 retrieve"的策略,否则 50+ stage 的工作流会爆 context window。
+4. **Context 长上下文累积** —— §12.10 已给出 4 层策略分层(Ref / 声明式 reads / agent retrieve / provider 摘要),但**实际效果依赖 provider 摘要质量**(Layer 3 兜底层)和 agent 协作智能( Layer 2)。Phase 2 必须有 e2e 测试覆盖"50+ stage workflow 不爆 context"。
 
 5. **多 workspace / 多 repo** —— 单 host 单 cwd 是 Phase 1 默认行为。如果用户要把 Conductor 跑在 monorepo 上同时编排多个 package,需要 workspace 隔离(类似 Paseo `workspace-labels`),**当前未设计**。
 
@@ -644,28 +925,32 @@ Phase 4:
 
 7. **Hub 的可靠性是单点** —— v0.2 已确认 multi-host Hub,但 Hub 本身是中心服务,挂了整个集群没法调度新 run(已运行的不受影响)。Phase 1 假设单 Hub;Phase 4 需考虑 Hub HA(主备/共识)。
 
-8. **测试与并发模型** —— Provider 进程是外部 spawn,Runner 事件流是异步迭代,Worker 图节点并发执行 —— 死锁、cancellation 传播、idempotency 必须从第一天设计进去,**当前尚未给出 cancellation 协议**。
+8. **测试与并发模型** —— §14 已给出 cancellation 协议,但死锁、cancellation 跨 host 传播一致性、idempotency 在分布式下的语义还需在 Phase 2 e2e 中验证(尤其 "Hub cancel → 多 host 级联"的赛跑场景)。
 
 9. **Provider 版本兼容** —— Claude Code SDK、Codex app-server 都在快速迭代。Provider 实现必须把"哪些字段是稳定的、哪些会变"显式标注,**当前未约定 deprecation 策略**。
 
 10. **不与 LLM 直接耦合** —— 这是 Conductor 的定位选择,但也意味着"用一个 LLM 当 planner 来动态生成图节点"的能力被限定在 Worker 层之上。如果未来需要"LLM 在线重规划图结构",引擎层必须支持热替换 NodeRef,**当前未实现**。
 
-## 16. 已确认的关键决策(v0.2)
+## 16. 已确认的关键决策(v0.3)
 
 | 决策点 | 选定方案 | 章节 |
 |---|---|---|
-| PDCA 引擎 | **A. 自研轻量引擎**(否掉 Temporal/Restate 重方案,否掉 prompt-only 退化) | §8.3 |
+| Workflow 引擎 | **A. 自研轻量软工作流引擎**(否掉 Temporal/Restate 重方案,否掉 prompt-only 退化) | §8.6 |
 | Player registry | **多 host Hub**(进程内 + 跨 host 注册中心) | §10.2 |
 | 持久化默认 | **文件 JSON + SQLite 一等切换**(运行时可切,wire schema 不变) | §11.1 |
 | 跨 provider 子 agent | **不做**,agent 间对等(peer) | §6.1 |
 | Provider 内部 subagent | **不干预**,纯观测 | §6.1 |
 | Context 跨步骤 | **强类型 StageSpec + Ref offload + Zod 校验** | §12 |
+| 长上下文策略 | **4 层分层**:Ref / 声明式 reads / agent retrieve / provider 摘要 | §12.10 |
+| Workflow 阶段 | **软工作流 + 语义标签**:PDCA(Plan→Do→Check→**Apply**)是默认预设,非强制;可扩展 GSD、自定义 phases | §8 |
+| 取消协议 | **三路合一**:Hub / 用户 / workflow 自身 → 同一 signal,三阶段生命周期 | §14 |
 | Web UI | Phase 1 不出,Phase 3+ 可选 | §9.1 |
 
 仍待确认的非阻塞项(实施时再定):
 - Hub 的鉴权模型(token / mTLS / SSH-like)
 - Provider 之间 auth/credential 隔离(`$CONDUCTOR_HOME/providers/<id>/auth`)
 - Web UI 是 Phase 1 还是 Phase 3+
+- Provider hook `onContextPressure` 的具体 contract(provider SDK 不统一,需要适配层)
 
 ---
 
@@ -689,7 +974,40 @@ Phase 4:
 
 ## 版本变更
 
-### v0.1 → v0.2(本次更新)
+### v0.2 → v0.3(本次更新)
+
+**用户决策**:
+- ✅ PDCA = **软工作流阶段标签**,非硬循环。A = **Apply**(不是 Act)。可扩展 phases。
+- ✅ Context 策略 = **4 层分层**:声明式 reads / agent retrieve / provider 摘要 / tiered memory
+- ✅ 超阈值摘要定位为 **provider 层兜底**,Conductor 不实现
+- ✅ 按需 retrieve 定位为 **agent 协作逻辑**,通过 `conductor.context.*` 工具族暴露
+
+**新增 §14 Cancellation Protocol**:
+- 4 类取消来源(用户/Hub/workflow/stage)+ 优先级
+- 三阶段生命周期(active → cancelling → cancelled/cancel_failed)
+- Signal 与 `timeoutMs`(默认 30s grace)
+- Provider 取消语义(各 provider SDK 行为差异 + persistence handle 恢复)
+- CancelPolicy(fail-fast / continue-siblings / drain)
+- 幂等性键设计
+- Hub 层取消 + host 迁移
+- 用户取消 UX(CLI + HTTP)
+
+**新增 §12.10 Context 策略 4 层分层**:
+- Layer 0:Ref 懒加载(已有,always-on)
+- Layer 1:Workflow spec `reads: [...]`(声明式)
+- Layer 2:`conductor.context.{get,list,search,summary}` 工具族(agent 协作层)
+- Layer 3:Provider hook `onContextPressure`(provider 兜底层)
+- Layer 4:Tiered memory(Phase 4+)
+
+**§8 重大修订**:
+- 标题改为"软工作流与阶段标签"
+- PDCA 改为预设而非唯一形态
+- 新增 §8.3 GSD 预设示例(research → spec → build → verify → ship)
+- 新增 §8.4 自定义阶段说明
+
+**下一轮(待用户输入)**:
+- Provider `onContextPressure` hook 的具体 contract(provider SDK 不统一)
+- cancel 跨 host 一致性测试场景设计
 
 **用户决策**:
 - ❌ 否决 Temporal/Restate(方案 B)——PDCA 引擎定为自研
