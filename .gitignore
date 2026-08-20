@@ -1,1 +1,17 @@
-.rtk/
+# Go
+/server/conductor
+/server/*.exe
+*.test
+*.out
+/coverage.txt
+
+# Node / webui (Phase 2+)
+node_modules/
+.next/
+dist/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
