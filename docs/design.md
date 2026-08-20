@@ -460,11 +460,11 @@ v0.2 决策:**registry 是多 host Hub 形态**——单 host 上的 daemon 仍�
 
 借鉴 Paseo `pid-lock.ts` 模式:同一 host 同一时间只允许一个 Daemon 实例,违反则报错退出。
 
-### 10.2 Registry — 进程内 + Hub
+### 10.2 Registry — 进程内(Phase 1)+ Hub(Phase 4+)
 
-**每 host 内部**:`PlayerRegistry` 是进程内 map,Go 实现见下。
+> v0.5 调整:Phase 1 **不做跨 host Hub**——"seamless 跨 host session 迁移"被识别为**过度工程**(详见 §10.4 顶部说明)。
 
-**跨 host**:Hub 是 Conductor 的另一个 daemon,维护所有 Player 的注册:
+**Phase 1**:只有进程内 `PlayerRegistry`,无 Hub。
 
 ```go
 // internal/registry/player.go —— 进程内注册表
@@ -495,27 +495,46 @@ func (h *PlayerHub) MigrateWorkflow(wf WorkflowID, from, to PlayerID) error { ..
 type PlayerSelector interface {
     Select(players []*PlayerEndpoint) (*PlayerEndpoint, error)
 }
-// 实现:
+// Phase 4+ 实现:
 //   AnySelector{}           // 任意健康 host
 //   TagSelector{Tags:...}   // host tag(架构、GPU、地域)
 //   ProviderSelector{Name}  // 必须有某 provider
 //   PinnedSelector{Player}  // 钉死某 host
 ```
 
+> **Phase 1 简化**:Hub 整个 §10.2 后半段不做,`PlayerHub` 类型保留在代码里但 phase 1 不实例化。
+
 > Hub 与 Player 间是 WS 长连接 + 心跳;Player 离线后 Hub 把 run 迁到其他健康 host(§11.6 恢复)。
 
-### 10.3 Worktree 隔离
+### 10.3 Worktree 隔离(Phase 1 必做)
 
 并行 agent 在同一 repo 上工作时必须隔离(否则 git 工作树互相覆盖)。直接复用 Paseo `server/worktree/` 的模式:每条并行 branch 自动 `git worktree add` 到 `.conductor/worktrees/<branch>`。
-Hub 调度时**优先把同 workflow 的 stage 路由到同一 host**(避免 worktree 反复 sync),只有该 host 不可用时才迁移。
 
-### 10.4 跨 Host Session 迁移(核心价值)
+**Phase 1 也需要**:即使没有 Hub,本机并行 agent 仍要 worktree 隔离(parallel stages 共享同一 host)。
+**Phase 4+ 才需要 "同 host 优先路由"**:Phase 1 没有跨 host 调度,worktree 自然在本机。
 
-> v0.4 关键架构决策。用户问题:"只支持一种 provider 是不是就能实现跨 host session 迁移?"
+### 10.4 跨 Host Session 迁移(**Phase 4+ 才做 — v0.5 重新评估**)
+
+> **v0.5 重大调整**:用户问题"是不是伪需求"刺中要害——诚实答案是:**Phase 1 不做**。
 >
-> **答案:是的——v0.4 推荐 Phase 1 只支持 Claude Code,把跨 host session 迁移做扎实;Phase 2 再加 provider。**
+> **为什么"seamless migration"在 Phase 1 是过度工程**:
+> - 高频场景(本地 daemon + 跨设备访问)不需要 session 迁移,Paseo 用 relay 就够
+> - 低频场景(host 宕机 / 长跑 SLA)有更简单的替代:`claude --resume <id>` 或 workflow checkpoint restart
+> - 真正的代价是:Hub 路由 + SessionMigrator + 失败回滚 4 阶段 + JSONL 版本兼容 + 7 个 e2e 测试 ——**为 1% 的场景付 40% 的复杂度税**
+>
+> **v0.4 的设计仍然保留**(phase 4+ 复用):
+> - `SessionMigrator` interface
+> - `SessionSnapshot` 结构
+> - `ClaudeSessionMigrator` 实现骨架
+> - Hub 路由逻辑
+>
+> **Phase 1 用户体验**(等价的):
+> - 本地 daemon + CLI/WebUI 控制
+> - 多 stage 并行 + worktree 隔离(本机内)
+> - workflow checkpoint(供本机恢复,**不**跨 host)
+> - 如需"另一台机器上看到/控制"——走 Paseo 的 E2E relay 模式
 
-#### 10.4.1 单 provider vs 多 provider 的迁移复杂度
+#### 10.4.1 单 provider vs 多 provider 的迁移复杂度(Phase 4+ 视角)
 
 | 维度 | 单 provider v1 (只 Claude) | 多 provider v1 |
 |---|---|---|
@@ -693,11 +712,13 @@ func (h *PlayerHub) MigrateWorkflow(wf WorkflowID, from, to PlayerID) error {
 
 
 
-### 10.5 同 Provider Task 的"无缝"边界
+### 10.5 同 Provider Task 的"无缝"边界(**Phase 4+ 才做 — v0.5 重新评估**)
 
-> v0.4 补充。用户问题:"task 使用同一种 provider 是不是就可以无缝迁移?"
+> **v0.5 调整**:与 §10.4 一同推迟到 Phase 4+。本节设计内容保留作为未来参考。
 >
-> **答案:是的——这是 §10.4 SessionMigrator 设计的 happy path。** 但"无缝"有清晰边界,这里列清楚。
+> 原 v0.4 立场:"task 使用同一种 provider 是不是就可以无缝迁移?" → 是,但代价过高。
+>
+> v0.5 立场:Phase 1 **不做 session migration**,改用 checkpoint + resume(`claude --resume`);Phase 4+ 再考虑 §10.4 / §10.5。
 
 #### 10.5.1 Happy Path 流程(同 provider task 跨 host)
 
@@ -1307,7 +1328,8 @@ Phase 3:
   - 更多编排原语(join 策略、loop 条件)
 
 Phase 4:
-  - Hub: 多 Daemon 注册与路由 + HA
+  - **Hub** + SessionMigrator 跨 host(§10.2 + §10.4 复活)
+  - 多 Daemon 注册与路由 + HA
   - 可选 Web UI
   - 可选 Postgres 后端
   - Tiered memory(Layer 4)
@@ -1525,23 +1547,29 @@ DELETE /v1/runs/<runId>?force=true            # 立即
 
 1. **PDCA 自研引擎的代价** —— 已选定方案 A(自研),代价是持久化恢复、超时取消、回放调试都要重做。需要在 §12.8 把 schemaVersion / cursor / degraded 标记做扎实;Phase 2 必须有"中断 + 续跑"的 e2e 测试覆盖。
 
-2. **跨 provider 子 agent 不做** —— §6.1 已硬约束:agent 是 peer,不做 Conductor-owned subagent。需要"Codex 调 Claude"协作时,只能走 Worker 编排层(让 Claude 作为独立 stage 跑),不能伪装成 provider 子 agent——这会损失一些"由 provider 维护的多轮上下文"语义,但换来清晰的边界。
+2. **Phase 1 不做跨 host session 迁移(§10.4) — v0.5 重要修正** —— 用户问题"无缝迁移是不是伪需求"刺中要害。诚实评估:99% 场景下 checkpoint + restart / `claude --resume` 够用,真正的 session migration 是为罕见极端场景(host 宕机、长跑 SLA)设计的复杂机制。Phase 1 砍掉 Hub + SessionMigrator,代码量少 40%,99% 用户体验不变。设计本身(v0.4 §10.4 / §10.5)保留,Phase 4+ 复用。
 
-3. **Provider-native subagent 的可见性差异** —— Claude Task 工具和 OMP task 工具产生的子 agent,我们通过 store 跟踪;但子 agent 的真实事件流受限于 provider SDK。Codex app-server 的子 agent 事件归一化成本可能不低。
+3. **跨 provider 子 agent 不做** —— §6.1 已硬约束:agent 是 peer,不做 Conductor-owned subagent。需要"Codex 调 Claude"协作时,只能走 Worker 编排层(让 Claude 作为独立 stage 跑),不能伪装成 provider 子 agent——这会损失一些"由 provider 维护的多轮上下文"语义,但换来清晰的边界。
 
-4. **Context 长上下文累积** —— §12.10 已给出 4 层策略分层(Ref / 声明式 reads / agent retrieve / provider 摘要),但**实际效果依赖 provider 摘要质量**(Layer 3 兜底层)和 agent 协作智能( Layer 2)。Phase 2 必须有 e2e 测试覆盖"50+ stage workflow 不爆 context"。
+4. **Provider-native subagent 的可见性差异** —— Claude Task 工具和 OMP task 工具产生的子 agent,我们通过 store 跟踪;但子 agent 的真实事件流受限于 provider SDK。Codex app-server 的子 agent 事件归一化成本可能不低。
 
-5. **多 workspace / 多 repo** —— 单 host 单 cwd 是 Phase 1 默认行为。如果用户要把 Conductor 跑在 monorepo 上同时编排多个 package,需要 workspace 隔离(类似 Paseo `workspace-labels`),**当前未设计**。
+5. **Context 长上下文累积** —— §12.10 已给出 4 层策略分层(Ref / 声明式 reads / agent retrieve / provider 摘要),但**实际效果依赖 provider 摘要质量**(Layer 3 兜底层)和 agent 协作智能( Layer 2)。Phase 2 必须有 e2e 测试覆盖"50+ stage workflow 不爆 context"。
 
-6. **Quota / Auth 抽象** —— Paseo 有 `services/quota-fetcher`,我们 Phase 1 不做。意味着用户得自己在 provider 配置里管 API key。
+6. **多 workspace / 多 repo** —— 单 host 单 cwd 是 Phase 1 默认行为。如果用户要把 Conductor 跑在 monorepo 上同时编排多个 package,需要 workspace 隔离(类似 Paseo `workspace-labels`),**当前未设计**。
 
-7. **Hub 的可靠性是单点** —— v0.2 已确认 multi-host Hub,但 Hub 本身是中心服务,挂了整个集群没法调度新 run(已运行的不受影响)。Phase 1 假设单 Hub;Phase 4 需考虑 Hub HA(主备/共识)。
+7. **Quota / Auth 抽象** —— Paseo 有 `services/quota-fetcher`,我们 Phase 1 不做。意味着用户得自己在 provider 配置里管 API key。
 
-8. **测试与并发模型** —— §14 已给出 cancellation 协议,但死锁、cancellation 跨 host 传播一致性、idempotency 在分布式下的语义还需在 Phase 2 e2e 中验证(尤其 "Hub cancel → 多 host 级联"的赛跑场景)。
+8. ~~**Hub 的可靠性是单点**~~ —— **v0.5 撤销**(Phase 1 无 Hub);Phase 4+ 复活时考虑 Hub HA(主备/共识)。
 
-9. **Provider 版本兼容** —— Claude Code SDK、Codex app-server 都在快速迭代。Provider 实现必须把"哪些字段是稳定的、哪些会变"显式标注,**当前未约定 deprecation 策略**。
+9. **测试与并发模型** —— §14 已给出 cancellation 协议,但死锁、idempotency 在分布式下的语义还需在 Phase 2 e2e 中验证。Phase 1 无跨 host,验证范围缩小但 §8 parallel stage 仍要死锁检测 + `go test -race`。
 
-10. **不与 LLM 直接耦合** —— 这是 Conductor 的定位选择,但也意味着"用一个 LLM 当 planner 来动态生成图节点"的能力被限定在 Worker 层之上。如果未来需要"LLM 在线重规划图结构",引擎层必须支持热替换 NodeRef,**当前未实现**。
+10. **Provider 版本兼容** —— Claude Code SDK、Codex app-server 都在快速迭代。Provider 实现必须把"哪些字段是稳定的、哪些会变"显式标注,**当前未约定 deprecation 策略**。
+
+11. **不与 LLM 直接耦合** —— 这是 Conductor 的定位选择,但也意味着"用一个 LLM 当 planner 来动态生成图节点"的能力被限定在 Worker 层之上。如果未来需要"LLM 在线重规划图结构",引擎层必须支持热替换 NodeRef,**当前未实现**。
+
+12. **过度工程风险(自我警告 — v0.5 新增)** —— "Player registry" / "Multi-host Hub" / "Seamless migration" 这些概念**容易被术语诱惑**(Multica 是团队协作平台所以需要这些,但 Conductor 是 dev 工具,用户场景不同)。v0.5 已自我修正砍掉 Hub/Migration,但 Phase 2+ 设计时仍要警惕:**新术语新抽象不要堆砌,先问"99% 用户场景真的需要吗?"**
+
+11. **过度工程风险(自我警告)** —— "Player registry" / "Multi-host Hub" / "Seamless migration" 这些概念**容易被术语诱惑**(Multica 是团队协作平台所以需要这些,但 Conductor 是 dev 工具,用户场景不同)。v0.5 已自我修正砍掉 Hub/Migration,但 Phase 2+ 设计时仍要警惕:**新术语新抽象不要堆砌,先问"99% 用户场景真的需要吗?"**
 
 ## 16. 已确认的关键决策(v0.4)
 
@@ -1549,9 +1577,10 @@ DELETE /v1/runs/<runId>?force=true            # 立即
 |---|---|---|
 | Server 语言栈 | **Go**(单 binary,Daemon/Hub/CLI 同进程;context.Context 原生支持 §14) | §0, §17 |
 | WebUI 语言栈 | **JS** (Next.js 14 App Router + React 18),Phase 1 后启动 | §3 |
-| Phase 1 provider | **单 provider**:Claude Code only(v1 不支持 Codex/Pi/ACP) | §10.4 |
-| 跨 host session 迁移 | **必须**(核心价值);通过 SessionMigrator interface + 单 provider 实现 | §10.4 |
-| Phase 2+ provider | 加新 provider 时新增实现,interface 不变;跨 provider 翻译暂不做 | §10.4, §12.11 |
+| Phase 1 形态 | **本地优先**(local-first),单 host daemon,Paseo 模型;无 Hub | §10, §10.5(v0.5)|
+| Phase 1 provider | **单 provider**:Claude Code only(v1 不支持 Codex/Pi/ACP) | §10.4(推迟) |
+| Phase 4+ 跨 host 迁移 | SessionMigrator + Hub 路由,**设计保留,实现推迟** | §10.4, §10.5 |
+| Phase 2+ provider | 加新 provider 时新增实现,interface 不变;跨 provider 翻译暂不做 | §12.11 |
 | Workflow 引擎 | **A. 自研轻量软工作流引擎**(否掉 Temporal/Restate 重方案,否掉 prompt-only 退化) | §8.6 |
 | Player registry | **多 host Hub**(进程内 + 跨 host 注册中心) | §10.2 |
 | 持久化默认 | **文件 JSON + SQLite 一等切换**(运行时可切,wire schema 不变) | §11.1 |
@@ -1933,6 +1962,29 @@ type ACPParser struct{ /* 与 Codex 同,但方法名是 ACP 规范的 */ }
 ---
 
 ## 版本变更
+
+### v0.4 → v0.5(本次更新 — Phase 1 范围重新评估)
+
+**用户问题**:"无缝迁移是不是伪需求?"
+**诚实回答**:**部分是的**。Phase 1 做过度工程;99% 场景下 checkpoint + restart 够用。
+
+**Phase 1 范围重大调整**:
+- ❌ 砍掉:Hub 跨 host 路由(§10.2 后半段)
+- ❌ 砍掉:SessionMigrator 跨 host 迁移(§10.4)
+- ❌ 砍掉:"无缝"边界表(§10.5)
+- ✅ 保留:SessionMigrator / SessionSnapshot / ClaudeSessionMigrator 设计骨架,Phase 4+ 复用
+- ✅ 保留:本机 worktree 隔离(§10.3,Phase 1 仍需要)
+- ✅ 新增:Phase 1 workflow checkpoint + 本地 resume
+- ✅ 新增(可选):E2E relay 跨设备访问(参考 Paseo)
+
+**§10 大调整**:§10.2 / §10.4 / §10.5 全部标 "Phase 4+";§10.3 改为"Phase 1 必做"
+
+**§13 路线图**:Phase 1 砍 hub + 跨 host 迁移,加 checkpoint + 本地 resume;Phase 4 复活 Hub + SessionMigrator
+
+**§16 决策表新增 1 行**:Phase 1 形态 = 本地优先(Paseo 模型),无 Hub
+
+**§15 自我审视新增第 11 条 — 过度工程风险**:
+> 警惕被术语诱惑,先问"99% 用户场景真的需要吗?"
 
 ### v0.3 → v0.4(本次更新)
 
