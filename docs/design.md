@@ -495,6 +495,63 @@ $CONDUCTOR_HOME/
 
 
 
+#### 6.2.9 为什么 Per-Run(而不是 Per-Spec)
+
+> v0.8 补充。用户问题:"为啥是 per run,而不是 per-spec?"
+
+**Per-spec 在我们的模型下有根本问题**:
+
+```
+设想 AgentSpec A = "Claude planner":
+  Run 1(周一) 用 spec A → spec A 的 HOME
+  Run 2(周二) 用 spec A → 同一个 spec A 的 HOME
+  Run 3(周三) 用 spec A 并行 → 还是同一个 HOME
+```
+
+**两个 run 同时跑同一 spec → 共享 HOME 写共享文件 → race**:
+
+| 文件 | 能否 race? |
+|---|---|
+| `~/.claude.json` | ❌ 两个 Claude 同时改 → 损坏 |
+| `~/.claude/settings.json` | ❌ 同上 |
+| `~/.claude/mcp.json` | ❌ 同上 |
+| session JSONL | ✅ session ID 唯一,文件名不冲突 |
+
+**清理粒度也反了**:
+- Spec 长寿命(用户定义,反复用)
+- Run 短寿命(一次执行)
+- Per-spec HOME → 删 Run 1 session 要遍历 spec HOME,可能误删别的 run
+- Per-run HOME → `rm -rf runs/<runId>` 一刀切,零歧义
+
+**那 per-spec HOME 想解决什么?**
+
+| 候选动机 | per-spec 真能解? | 正确做法 |
+|---|---|---|
+| "同 spec 重复 run 想续上次 session" | ❌ race + 命名混乱 | `--resume <session-id>` flag |
+| "spec 默认 config 跨 run 复用" | ⚠️ config 共享 ≠ HOME 共享 | `$CONDUCTOR_HOME/specs/<specId>/config.json`(纯配置)|
+| "想节省 HOME dir 数量" | 是,但代价高 | 不优化 |
+
+**Per-run 在 3 个并发场景下都正确**:
+
+| 场景 | per-run 行为 |
+|---|---|
+| 并行 2 个不同的 spec | Run 1 (spec A) → HOME_A,Run 2 (spec B) → HOME_B,完全隔离 |
+| 并行 2 个相同的 spec | Run 1 (spec A) → HOME_1,Run 2 (spec A) → HOME_2,session/setting 不共享 |
+| 同一 run 内多个 stages | 全程一个 HOME,session ID 各异,settings/MCP 共享(合理,同 task)|
+
+**如果用户真要"session 跨 run 续"**——那是 **workspace** 语义(Paseo 已有),不是 spec:
+
+```
+Phase 2+ workspace 模型(若需要):
+$CONDUCTOR_HOME/workspaces/<workspaceId>/home/    ← 持久 HOME
+$CONDUCTOR_HOME/workspaces/<workspaceId>/runs/<runId>/
+  state.json / timeline / blobs
+```
+
+Phase 1 不需要 workspace。per-run 够用。
+
+---
+
 ## 7. Agent Worker 层 —— 编排图节点
 
 这是用户原始分层里的"编排层",提供 5 种基本节点:
