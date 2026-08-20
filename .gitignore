@@ -1,4 +1,5 @@
 # Go
+/conductor
 /server/conductor
 /server/*.exe
 *.test

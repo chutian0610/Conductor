@@ -27,11 +27,6 @@ func runDaemon(_ context.Context, _ []string) error {
 	return ErrNotImplemented
 }
 
-func runSpec(_ context.Context, _ []string) error {
-	cli.Errorf("conductor spec: %s", ErrNotImplemented)
-	return ErrNotImplemented
-}
-
 func runRun(_ context.Context, _ []string) error {
 	cli.Errorf("conductor run: %s", ErrNotImplemented)
 	return ErrNotImplemented
