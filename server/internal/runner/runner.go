@@ -3,10 +3,12 @@ package runner
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"conductor/server/internal/provider/codex"
 	"conductor/server/internal/protocol"
 	"conductor/server/internal/spec"
+	"conductor/server/internal/storage"
 )
 
 // EventHandler is called once per AgentStreamEvent as it arrives
@@ -25,32 +27,51 @@ type EventHandler func(ev protocol.AgentStreamEvent)
 // picks up its config.toml + auth symlink), the prompt is sent,
 // and the call blocks until turn/completed arrives.
 //
-// Streaming events are delivered via onEvent (if non-nil). The
-// final AgentTurnResult (token usage, finish reason, session id)
-// is returned.
+// store records the run. Pass storage.NoopStorage{} to skip
+// persistence. The store is updated on three events:
+//
+//   1. start: CreateRun (Status=running, StartedAt=now)
+//   2. each stream event: AppendTimeline
+//   3. end: UpdateRun (Status=completed + Result OR Status=failed + Error)
+//
+// Streaming events are also delivered via onEvent (if non-nil)
+// for callers that want to print them as they arrive (the CLI
+// uses this). Events are persisted via the store regardless of
+// whether onEvent is set.
 //
 // Errors:
 //   - spec.ErrNotFound: unknown specId
+//   - storage: failed to record run start (before any codex work)
 //   - codex.NewSession failure (HOME missing, binary missing, ...)
 //   - turn/start or turn/completed failure
 //   - ctx cancellation
-//
-// Phase 1 doesn't yet persist anything to disk; if the caller
-// needs a timeline, it must capture events via onEvent.
-func Invoke(ctx context.Context, specId, prompt string, onEvent EventHandler) (*protocol.AgentTurnResult, error) {
-	if specId == "" {
-		return nil, fmt.Errorf("runner: specId required")
+func Invoke(ctx context.Context, specID, prompt string, runID string, store storage.Storage, onEvent EventHandler) (*protocol.AgentTurnResult, error) {
+	if specID == "" {
+		return nil, fmt.Errorf("runner: specID required")
 	}
 	if prompt == "" {
 		return nil, fmt.Errorf("runner: prompt required")
 	}
+	if runID == "" {
+		return nil, fmt.Errorf("runner: runID required")
+	}
 
-	record, err := spec.Get(ctx, specId)
+	record, err := spec.Get(ctx, specID)
 	if err != nil {
 		return nil, err
 	}
 
+	// Record run start. Failure here is fatal — the user wants
+	// history, not silent drops.
+	state, err := store.CreateRun(ctx, runID, specID, prompt)
+	if err != nil {
+		return nil, fmt.Errorf("storage CreateRun: %w", err)
+	}
+	_ = state // currently unused; reserved for future spec metadata snapshots
+
 	sess, err := codex.NewSession(ctx, codex.SessionConfig{
+		// Per-spec HOME (so codex reads its config.toml + .codex.json
+		// from the right place — §6.2.5).
 		Home:          record.HomePath,
 		Cwd:           record.Spec.Cwd,
 		Model:         record.Spec.Model,
@@ -61,77 +82,155 @@ func Invoke(ctx context.Context, specId, prompt string, onEvent EventHandler) (*
 		MCPConfig:     record.Spec.MCPConfig,
 	})
 	if err != nil {
+		_ = markFailed(ctx, store, runID, err)
 		return nil, fmt.Errorf("open codex session: %w", err)
 	}
 
-	// handlerDone is closed when the onEvent goroutine exits.
-	// We MUST wait on it before returning so callers can rely on
-	// all events being processed (the CLI uses this to print the
-	// final result summary without racing the handler for the
-	// output writer).
+	// Tee each event to both the caller's handler AND the storage
+	// timeline. Done in a single goroutine (per pump-tap) so the
+	// ordering is preserved across both sinks.
 	handlerDone := make(chan struct{})
-	if onEvent != nil {
-		go func() {
-			defer close(handlerDone)
-			for ev := range sess.Events() {
+	go func() {
+		defer close(handlerDone)
+		for ev := range sess.Events() {
+			_ = store.AppendTimeline(ctx, runID, storage.TimelineItem{
+				TS:    timeNow(),
+				Event: ev,
+			})
+			if onEvent != nil {
 				onEvent(ev)
 			}
-		}()
-	} else {
-		close(handlerDone)
-	}
+		}
+	}()
 
 	result, err := sess.Send(ctx, prompt)
 
-	// Close the session BEFORE waiting on the handler. Close()
-	// terminates the events channel, which lets the handler
-	// goroutine exit, which closes handlerDone. Order matters:
-	// Close -> handler exits -> done closes.
+	// Close session, then wait for handler to drain remaining events.
 	sess.Close()
 	<-handlerDone
 
-	return result, err
+	if err != nil {
+		_ = markFailed(ctx, store, runID, err)
+		return nil, err
+	}
+
+	// Persist the final state under the per-runID mutex (so a
+	// concurrent reader can't see partial fields).
+	if result != nil {
+		finish := timeNow()
+		err = store.UpdateRun(ctx, runID, func(rs *storage.RunState) {
+			rs.Status = storage.RunStatusCompleted
+			rs.FinishedAt = &finish
+			rs.SessionID = result.SessionID
+			rs.Result = result
+		})
+	} else {
+		_ = markFailed(ctx, store, runID, fmt.Errorf("nil result"))
+	}
+	if err != nil {
+		return result, fmt.Errorf("storage UpdateRun: %w", err)
+	}
+	return result, nil
 }
 
-func InvokeWithSessionId(ctx context.Context, specId, sessionId, prompt string, onEvent EventHandler) (*protocol.AgentTurnResult, error) {
-	if specId == "" {
-		return nil, fmt.Errorf("runner: specId required")
+// InvokeWithSessionId is like Invoke but resumes an existing
+// Codex thread instead of starting a new one. sessionId is the
+// thread id previously returned from turn/completed (see
+// AgentTurnResult.SessionID).
+//
+// Phase 1 keeps this separate so the runner's "start fresh" path
+// stays obvious.
+func InvokeWithSessionId(ctx context.Context, specID, sessionID, prompt, runID string, store storage.Storage, onEvent EventHandler) (*protocol.AgentTurnResult, error) {
+	if specID == "" {
+		return nil, fmt.Errorf("runner: specID required")
 	}
 	if prompt == "" {
 		return nil, fmt.Errorf("runner: prompt required")
 	}
-	if sessionId == "" {
-		return nil, fmt.Errorf("runner: sessionId required")
+	if sessionID == "" {
+		return nil, fmt.Errorf("runner: sessionID required")
+	}
+	if runID == "" {
+		return nil, fmt.Errorf("runner: runID required")
 	}
 
-	record, err := spec.Get(ctx, specId)
+	record, err := spec.Get(ctx, specID)
 	if err != nil {
 		return nil, err
 	}
 
+	if _, err := store.CreateRun(ctx, runID, specID, prompt); err != nil {
+		return nil, fmt.Errorf("storage CreateRun: %w", err)
+	}
+
 	sess, err := codex.NewSession(ctx, codex.SessionConfig{
-		Home:          record.HomePath,
-		Cwd:           record.Spec.Cwd,
-		Model:         record.Spec.Model,
-		SystemPrompt:  record.Spec.SystemPrompt,
-		Thinking:      record.Spec.Thinking,
-		ToolsAllow:    record.Spec.ToolsAllow,
-		ToolsExclude:  record.Spec.ToolsExclude,
-		MCPConfig:     record.Spec.MCPConfig,
-		SessionId:     sessionId, // routes to thread/resume
+		Home:         record.HomePath,
+		Cwd:          record.Spec.Cwd,
+		Model:        record.Spec.Model,
+		SystemPrompt: record.Spec.SystemPrompt,
+		Thinking:     record.Spec.Thinking,
+		ToolsAllow:   record.Spec.ToolsAllow,
+		ToolsExclude: record.Spec.ToolsExclude,
+		MCPConfig:    record.Spec.MCPConfig,
+		SessionId:    sessionID, // routes to thread/resume
 	})
 	if err != nil {
+		_ = markFailed(ctx, store, runID, err)
 		return nil, fmt.Errorf("open codex session: %w", err)
 	}
-	defer sess.Close()
 
-	if onEvent != nil {
-		go func() {
-			for ev := range sess.Events() {
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		for ev := range sess.Events() {
+			_ = store.AppendTimeline(ctx, runID, storage.TimelineItem{
+				TS:    timeNow(),
+				Event: ev,
+			})
+			if onEvent != nil {
 				onEvent(ev)
 			}
-		}()
+		}
+	}()
+
+	result, err := sess.Send(ctx, prompt)
+	sess.Close()
+	<-handlerDone
+
+	if err != nil {
+		_ = markFailed(ctx, store, runID, err)
+		return nil, err
 	}
 
-	return sess.Send(ctx, prompt)
+	if result != nil {
+		finish := timeNow()
+		err = store.UpdateRun(ctx, runID, func(rs *storage.RunState) {
+			rs.Status = storage.RunStatusCompleted
+			rs.FinishedAt = &finish
+			rs.SessionID = result.SessionID
+			rs.Result = result
+		})
+	} else {
+		_ = markFailed(ctx, store, runID, fmt.Errorf("nil result"))
+	}
+	if err != nil {
+		return result, fmt.Errorf("storage UpdateRun: %w", err)
+	}
+	return result, nil
 }
+
+// markFailed transitions a run to status=failed with the given
+// error message. Best-effort — caller doesn't act on the result.
+func markFailed(ctx context.Context, store storage.Storage, runID string, err error) error {
+	msg := err.Error()
+	return store.UpdateRun(ctx, runID, func(rs *storage.RunState) {
+		finish := timeNow()
+		rs.Status = storage.RunStatusFailed
+		rs.FinishedAt = &finish
+		rs.Error = msg
+	})
+}
+
+// timeNow returns the current UTC time. Stubbed as a var so
+// tests can pin timestamps.
+var timeNow = func() time.Time { return time.Now().UTC() }

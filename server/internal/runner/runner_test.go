@@ -13,6 +13,7 @@ import (
 
 	"conductor/server/internal/home"
 	"conductor/server/internal/protocol"
+	"conductor/server/internal/storage"
 	"conductor/server/internal/spec"
 )
 
@@ -116,7 +117,7 @@ func TestInvokeHappyPath(t *testing.T) {
 		mu.Unlock()
 	}
 
-	result, err := Invoke(context.Background(), specId, "hello", handler)
+	result, err := Invoke(context.Background(), specId, "hello", "test-run-id", storage.NoopStorage{}, handler)
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
@@ -148,7 +149,7 @@ func TestInvokeHappyPath(t *testing.T) {
 // missing" from "codex broke".
 func TestInvokeSpecNotFound(t *testing.T) {
 	t.Setenv("CONDUCTOR_HOME", t.TempDir())
-	_, err := Invoke(context.Background(), "no-such-spec", "x", nil)
+	_, err := Invoke(context.Background(), "no-such-spec", "x", "test-run-id", storage.NoopStorage{}, nil)
 	if !errors.Is(err, spec.ErrNotFound) {
 		t.Errorf("err = %v, want spec.ErrNotFound", err)
 	}
@@ -156,9 +157,9 @@ func TestInvokeSpecNotFound(t *testing.T) {
 
 // TestInvokeRequiresSpecId — empty specId rejected up front.
 func TestInvokeRequiresSpecId(t *testing.T) {
-	_, err := Invoke(context.Background(), "", "x", nil)
-	if err == nil || !strings.Contains(err.Error(), "specId required") {
-		t.Errorf("err = %v, want 'specId required'", err)
+	_, err := Invoke(context.Background(), "", "x", "test-run-id", storage.NoopStorage{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "specID required") {
+		t.Errorf("err = %v, want 'specID required'", err)
 	}
 }
 
@@ -169,7 +170,7 @@ func TestInvokeRequiresPrompt(t *testing.T) {
 
 	// PATH wrapper not strictly needed (error fires before the
 	// subprocess starts), but harmless.
-	_, err := Invoke(context.Background(), specId, "", nil)
+	_, err := Invoke(context.Background(), specId, "", "test-run-id", storage.NoopStorage{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "prompt required") {
 		t.Errorf("err = %v, want 'prompt required'", err)
 	}
@@ -188,7 +189,7 @@ func TestInvokeOnEventNil(t *testing.T) {
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	result, err := Invoke(context.Background(), specId, "test", nil)
+	result, err := Invoke(context.Background(), specId, "test", "test-run-id", storage.NoopStorage{}, nil)
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
@@ -233,7 +234,7 @@ done
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	_, err := Invoke(ctx, specId, "test", nil)
+	_, err := Invoke(ctx, specId, "test", "test-run-id", storage.NoopStorage{}, nil)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("err = %v, want context.DeadlineExceeded", err)
 	}
@@ -296,7 +297,7 @@ done
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	if _, err := Invoke(ctx, res.SpecId, "test", nil); err != nil {
+	if _, err := Invoke(ctx, res.SpecId, "test", "test-run-id", storage.NoopStorage{}, nil); err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
 

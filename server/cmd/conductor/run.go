@@ -21,6 +21,7 @@ import (
 
 	"conductor/server/internal/cli"
 	"conductor/server/internal/protocol"
+	"conductor/server/internal/storage"
 	"conductor/server/internal/runner"
 )
 
@@ -74,14 +75,20 @@ Flags:
 
 	handler := buildEventPrinter(stdout, f.JSON, f.Quiet)
 
-	var (
-		result *protocol.AgentTurnResult
-		err    error
-	)
+	// Open storage. Phase 1 ships JsonFileStorage; future SqliteStorage
+	// drops in transparently via the Storage interface.
+	store, err := storage.NewJsonFileStorage()
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %s\n", err)
+		return err
+	}
+	runID := storage.NewRunID()
+
+	var result *protocol.AgentTurnResult
 	if f.Resume != "" {
-		result, err = runner.InvokeWithSessionId(ctx, f.Spec, f.Resume, prompt, handler)
+		result, err = runner.InvokeWithSessionId(ctx, f.Spec, f.Resume, prompt, runID, store, handler)
 	} else {
-		result, err = runner.Invoke(ctx, f.Spec, prompt, handler)
+		result, err = runner.Invoke(ctx, f.Spec, prompt, runID, store, handler)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %s\n", err)
@@ -93,6 +100,10 @@ Flags:
 	// is always printed (otherwise there is no way to know the run
 	// finished or what the result was).
 	printRunSummary(stdout, result)
+	if result != nil && result.SessionID != "" {
+		fmt.Fprintf(stdout, "runId:     %s\n", runID)
+		fmt.Fprintf(stdout, "sessionId: %s\n", result.SessionID)
+	}
 	return nil
 }
 
