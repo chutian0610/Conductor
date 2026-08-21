@@ -7,10 +7,10 @@ import (
 	"time"
 )
 
-// TestWriteCodexFakeV2 is a smoke test for the fakev2 helper itself.
+// TestWriteCodexFake is a smoke test for the fakecodex helper itself.
 // It spins up the fake, runs the full initialize handshake, then
 // sends a ping. Verifies the responses parse cleanly.
-func TestWriteCodexFakeV2(t *testing.T) {
+func TestWriteCodexFake(t *testing.T) {
 	if _, err := exec.LookPath("/bin/sh"); err != nil {
 		t.Skip("/bin/sh not available")
 	}
@@ -18,7 +18,7 @@ func TestWriteCodexFakeV2(t *testing.T) {
 	defer cancel()
 
 	// Empty customizer: just rely on the default case (echo ok + 1 notification).
-	scriptPath := writeCodexFakeV2(t, "")
+	scriptPath := WriteCodexFake(t, "")
 
 	c, err := NewClient(ctx, ClientConfig{
 		Bin:  "/bin/sh",
@@ -41,9 +41,9 @@ func TestWriteCodexFakeV2(t *testing.T) {
 	}
 }
 
-// TestWriteCodexFakeV2Customizer verifies the customizer case
+// TestWriteCodexFakeCustomizer verifies the customizer case
 // branches run inside the case statement, with $ID available.
-func TestWriteCodexFakeV2Customizer(t *testing.T) {
+func TestWriteCodexFakeCustomizer(t *testing.T) {
 	if _, err := exec.LookPath("/bin/sh"); err != nil {
 		t.Skip("/bin/sh not available")
 	}
@@ -52,7 +52,7 @@ func TestWriteCodexFakeV2Customizer(t *testing.T) {
 
 	// Customizer: thread/start echoes a specific threadId; other
 	// methods fall through to the default case.
-	scriptPath := writeCodexFakeV2(t, `    thread/start)
+	scriptPath := WriteCodexFake(t, `    thread/start)
       printf '%s\n' '{"jsonrpc":"2.0","id":'$ID',"result":{"threadId":"thr-custom"}}'
       ;;
 `)

@@ -31,7 +31,7 @@ func TestClientCallRoundTrip(t *testing.T) {
 	defer cancel()
 
 	// v2 fake: handles initialize handshake; default case is "ok" + notification.
-	scriptPath := writeCodexFakeV2(t, "")
+	scriptPath := WriteCodexFake(t, "")
 
 	c, err := NewClient(ctx, ClientConfig{
 		Bin: "/bin/sh",
@@ -86,7 +86,7 @@ func TestClientCloseIdempotent(t *testing.T) {
 
 	// v2 fake: handles initialize + initialized, then auto-exits so we
 	// test Close idempotency (not the handshake).
-	scriptPath := writeCodexFakeV2(t, "    *)\n      # Exit immediately so Close is called against a\n      # dead subprocess (testing idempotency, not the handshake).\n      exit 0\n      ;;")
+	scriptPath := WriteCodexFake(t, "    *)\n      # Exit immediately so Close is called against a\n      # dead subprocess (testing idempotency, not the handshake).\n      exit 0\n      ;;")
 
 	c, err := NewClient(ctx, ClientConfig{
 		Bin: "/bin/sh",

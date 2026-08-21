@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// writeCodexFakeV2 writes a shell-script fake of `codex app-server`
+// WriteCodexFake writes a shell-script fake of `codex app-server`
 // that handles the codex 0.147+ initialize handshake, then defers
 // to caller-supplied customizer shell code for any other request.
 //
@@ -37,7 +37,7 @@ import (
 //
 // $ID and $REQ are available; $METHOD too. The closing `esac` and
 // `done` loop are added by this helper.
-func writeCodexFakeV2(t *testing.T, customizer string) string {
+func WriteCodexFake(t *testing.T, customizer string) string {
 	t.Helper()
 	if _, err := exec.LookPath("/bin/sh"); err != nil {
 		t.Skip("/bin/sh not available")
@@ -78,7 +78,7 @@ while read -r REQ; do
 done
 `, customizer)
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("writeCodexFakeV2: %v", err)
+		t.Fatalf("WriteCodexFake: %v", err)
 	}
 	return path
 }
