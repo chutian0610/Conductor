@@ -24,6 +24,11 @@ import (
 //     any notifications. If the customizer is empty, the default
 //     case below applies.
 //
+// If $CONDUCTOR_FAKE_LOG is set in the environment, every parsed
+// $METHOD is appended to that file (one per line, arrival order).
+// Tests use this to assert which JSON-RPC methods were called
+// (e.g. that thread/resume fires instead of thread/start).
+//
 // The customizer is a string of valid bash code inserted INSIDE
 // the case statement. It can introduce additional case branches:
 //
@@ -59,6 +64,7 @@ trap "exit 0" INT TERM
 while read -r REQ; do
   ID=$(printf '%%s' "$REQ" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
   METHOD=$(printf '%%s' "$REQ" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
+  [ -n "$CONDUCTOR_FAKE_LOG" ] && printf '%%s\n' "$METHOD" >> "$CONDUCTOR_FAKE_LOG"
   case "$METHOD" in
     initialize)
       printf '%%s\n' '{"jsonrpc":"2.0","id":'$ID',"result":{"userAgent":"Conductor test","codexHome":"/tmp","platformFamily":"unix","platformOs":"linux"}}'

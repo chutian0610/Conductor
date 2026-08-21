@@ -14,75 +14,7 @@ import (
 	"conductor/server/internal/protocol"
 )
 
-// fakeCodexScript returns a shell script that simulates a codex
-// app-server. Recognised methods (case-by-case in shell):
-//
-//   thread/start    → {"result":{"threadId":"thr-fake"}}
-//   thread/resume   → same (SessionId is logged to CONDUCTOR_FAKE_LOG
-//                     so tests can verify resume was called)
-//   turn/start      → {"result":{"ok":true}} then emits:
-//                     - item/agentMessage/delta {"text":"hi"}
-//                     - item/toolCall          {"name":"bash",...}
-//                     - item/toolResult        {"result":"ok"}
-//                     - turn/completed         (with usage/finish/threadId)
-//   turn/interrupt  → {"result":{"ok":true}} then exits 0
-//   anything else   → JSON-RPC error -32601
-//
-// Pass empty keepOpen to make the fake exit after the first turn
-// (so Close() can drain); pass "keepOpen" to leave stdin open for
-// more turns.
-const fakeCodexScript = `#!/bin/sh
-METHOD=""
-KEEPOPEN="$1"
-while read -r REQ; do
-  METHOD=$(printf '%s' "$REQ" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
-  ID=$(printf '%s' "$REQ" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
-  [ -n "$CONDUCTOR_FAKE_LOG" ] && printf '%s\n' "$METHOD" >> "$CONDUCTOR_FAKE_LOG"
-  if [ "$METHOD" = "initialize" ]; then
-    printf '%s
-' '{"jsonrpc":"2.0","id":'"$ID"',"result":{"userAgent":"Conductor test"}}'
-    printf '%s
-' '{"jsonrpc":"2.0","method":"initialized","params":{}}'
-    continue
-  fi
-  case "$METHOD" in
-    thread/start)
-      echo "{\"jsonrpc\":\"2.0\",\"id\":${ID},\"result\":{\"threadId\":\"thr-fake\"}}"
-      ;;
-    thread/resume)
-      echo "{\"jsonrpc\":\"2.0\",\"id\":${ID},\"result\":{\"threadId\":\"thr-resumed\"}}"
-      ;;
-    turn/start)
-      echo "{\"jsonrpc\":\"2.0\",\"id\":${ID},\"result\":{\"ok\":true}}"
-      echo '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"text":"hi"}}'
-      echo '{"jsonrpc":"2.0","method":"item/toolCall","params":{"name":"bash","id":"c1","arguments":{"cmd":"ls"}}}'
-      echo '{"jsonrpc":"2.0","method":"item/toolResult","params":{"result":"ok"}}'
-      echo '{"jsonrpc":"2.0","method":"turn/completed","params":{"usage":{"inputTokens":10,"outputTokens":5,"costUsd":0.0012},"finish":{"reason":"end_turn","success":true},"threadId":"thr-fake"}}'
-      if [ "$KEEPOPEN" != "keepOpen" ]; then
-        # Block on stdin so the client has time to consume the events
-        # before we exit. Closing stdin would also work but reading
-        # is more portable across shells.
-        read -r _ || exit 0
-      fi
-      ;;
-    turn/interrupt)
-      echo "{\"jsonrpc\":\"2.0\",\"id\":${ID},\"result\":{\"ok\":true}}"
-      exit 0
-      ;;
-    *)
-      echo "{\"jsonrpc\":\"2.0\",\"id\":${ID},\"error\":{\"code\":-32601,\"message\":\"method not found: ${METHOD}\"}}"
-      ;;
-  esac
-done
-`
 
-// writeFakeCodex writes the fakeCodexScript to a temp file and
-// returns the path. Pass keepOpen="" to make the fake exit after
-// one turn, or "keepOpen" to leave stdin open.
-func writeFakeCodex(t *testing.T, keepOpen string) string {
-	t.Helper()
-	return writeFake(t, fakeCodexScript+"\n# arg: "+keepOpen+"\n")
-}
 
 // readMethodLog returns the methods seen by the fake (one per
 // line, in arrival order).
@@ -111,7 +43,24 @@ func TestSessionTurn(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	scriptPath := writeFakeCodex(t, "")
+	scriptPath := WriteCodexFake(t, `    thread/start)
+      echo '{"jsonrpc":"2.0","id":'$ID',"result":{"threadId":"thr-fake"}}'
+      ;;
+    thread/resume)
+      echo '{"jsonrpc":"2.0","id":'$ID',"result":{"threadId":"thr-resumed"}}'
+      ;;
+    turn/start)
+      echo '{"jsonrpc":"2.0","id":'$ID',"result":{"ok":true}}'
+      echo '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"text":"hi"}}'
+      echo '{"jsonrpc":"2.0","method":"item/toolCall","params":{"name":"bash","id":"c1","arguments":{"cmd":"ls"}}}'
+      echo '{"jsonrpc":"2.0","method":"item/toolResult","params":{"result":"ok"}}'
+      echo '{"jsonrpc":"2.0","method":"turn/completed","params":{"usage":{"inputTokens":10,"outputTokens":5,"costUsd":0.0012},"finish":{"reason":"end_turn","success":true},"threadId":"thr-fake"}}'
+      read -r _ || exit 0
+      ;;
+    turn/interrupt)
+      echo '{"jsonrpc":"2.0","id":'$ID',"result":{"ok":true}}'
+      exit 0
+      ;;`)
 	sess, err := NewSession(ctx, SessionConfig{
 		Bin:   "/bin/sh",
 		Args:  []string{scriptPath, "keepOpen"},
@@ -203,7 +152,24 @@ func TestSessionResume(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	scriptPath := writeFakeCodex(t, "")
+	scriptPath := WriteCodexFake(t, `    thread/start)
+      echo '{"jsonrpc":"2.0","id":'$ID',"result":{"threadId":"thr-fake"}}'
+      ;;
+    thread/resume)
+      echo '{"jsonrpc":"2.0","id":'$ID',"result":{"threadId":"thr-resumed"}}'
+      ;;
+    turn/start)
+      echo '{"jsonrpc":"2.0","id":'$ID',"result":{"ok":true}}'
+      echo '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"text":"hi"}}'
+      echo '{"jsonrpc":"2.0","method":"item/toolCall","params":{"name":"bash","id":"c1","arguments":{"cmd":"ls"}}}'
+      echo '{"jsonrpc":"2.0","method":"item/toolResult","params":{"result":"ok"}}'
+      echo '{"jsonrpc":"2.0","method":"turn/completed","params":{"usage":{"inputTokens":10,"outputTokens":5,"costUsd":0.0012},"finish":{"reason":"end_turn","success":true},"threadId":"thr-fake"}}'
+      read -r _ || exit 0
+      ;;
+    turn/interrupt)
+      echo '{"jsonrpc":"2.0","id":'$ID',"result":{"ok":true}}'
+      exit 0
+      ;;`)
 	sess, err := NewSession(ctx, SessionConfig{
 		Bin:       "/bin/sh",
 		Args:      []string{scriptPath, "keepOpen"},
@@ -255,7 +221,24 @@ func TestSessionCancel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	scriptPath := writeFakeCodex(t, "")
+	scriptPath := WriteCodexFake(t, `    thread/start)
+      echo '{"jsonrpc":"2.0","id":'$ID',"result":{"threadId":"thr-fake"}}'
+      ;;
+    thread/resume)
+      echo '{"jsonrpc":"2.0","id":'$ID',"result":{"threadId":"thr-resumed"}}'
+      ;;
+    turn/start)
+      echo '{"jsonrpc":"2.0","id":'$ID',"result":{"ok":true}}'
+      echo '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"text":"hi"}}'
+      echo '{"jsonrpc":"2.0","method":"item/toolCall","params":{"name":"bash","id":"c1","arguments":{"cmd":"ls"}}}'
+      echo '{"jsonrpc":"2.0","method":"item/toolResult","params":{"result":"ok"}}'
+      echo '{"jsonrpc":"2.0","method":"turn/completed","params":{"usage":{"inputTokens":10,"outputTokens":5,"costUsd":0.0012},"finish":{"reason":"end_turn","success":true},"threadId":"thr-fake"}}'
+      read -r _ || exit 0
+      ;;
+    turn/interrupt)
+      echo '{"jsonrpc":"2.0","id":'$ID',"result":{"ok":true}}'
+      exit 0
+      ;;`)
 	sess, err := NewSession(ctx, SessionConfig{
 		Bin:  "/bin/sh",
 		Args: []string{scriptPath, "keepOpen"},
@@ -305,7 +288,24 @@ func TestSessionSendAfterClose(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	scriptPath := writeFakeCodex(t, "keepOpen")
+	scriptPath := WriteCodexFake(t, `    thread/start)
+      echo '{"jsonrpc":"2.0","id":'$ID',"result":{"threadId":"thr-fake"}}'
+      ;;
+    thread/resume)
+      echo '{"jsonrpc":"2.0","id":'$ID',"result":{"threadId":"thr-resumed"}}'
+      ;;
+    turn/start)
+      echo '{"jsonrpc":"2.0","id":'$ID',"result":{"ok":true}}'
+      echo '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"text":"hi"}}'
+      echo '{"jsonrpc":"2.0","method":"item/toolCall","params":{"name":"bash","id":"c1","arguments":{"cmd":"ls"}}}'
+      echo '{"jsonrpc":"2.0","method":"item/toolResult","params":{"result":"ok"}}'
+      echo '{"jsonrpc":"2.0","method":"turn/completed","params":{"usage":{"inputTokens":10,"outputTokens":5,"costUsd":0.0012},"finish":{"reason":"end_turn","success":true},"threadId":"thr-fake"}}'
+      sleep 999
+      ;;
+    turn/interrupt)
+      echo '{"jsonrpc":"2.0","id":'$ID',"result":{"ok":true}}'
+      exit 0
+      ;;`)
 	sess, err := NewSession(ctx, SessionConfig{
 		Bin:  "/bin/sh",
 		Args: []string{scriptPath},
