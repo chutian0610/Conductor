@@ -22,6 +22,11 @@ const runFakeCodexScript = `#!/bin/sh
 while read -r REQ; do
   METHOD=$(printf '%s' "$REQ" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
   ID=$(printf '%s' "$REQ" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  if [ "$METHOD" = "initialize" ]; then
+    printf '%s\n' '{"jsonrpc":"2.0","id":'"$ID"',"result":{"userAgent":"Conductor test"}}'
+    printf '%s\n' '{"jsonrpc":"2.0","method":"initialized","params":{}}'
+    continue
+  fi
   case "$METHOD" in
     thread/start) echo "{\"jsonrpc\":\"2.0\",\"id\":${ID},\"result\":{\"threadId\":\"thr-cmd\"}}";;
     thread/resume) echo "{\"jsonrpc\":\"2.0\",\"id\":${ID},\"result\":{\"threadId\":\"thr-cmd-resumed\"}}";;
@@ -232,6 +237,11 @@ while read -r REQ; do
   METHOD=$(printf '%s' "$REQ" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
   ID=$(printf '%s' "$REQ" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
   [ -n "$LOGFILE" ] && printf '%s\n' "$METHOD" >> "$LOGFILE"
+  if [ "$METHOD" = "initialize" ]; then
+    printf '%s\n' '{"jsonrpc":"2.0","id":'"$ID"',"result":{"userAgent":"Conductor test"}}'
+    printf '%s\n' '{"jsonrpc":"2.0","method":"initialized","params":{}}'
+    continue
+  fi
   case "$METHOD" in
     thread/start)
       printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":${ID},\"result\":{\"threadId\":\"thr-cmd\"}}"
@@ -337,12 +347,27 @@ func TestRunResumeRunByRunID(t *testing.T) {
 		t.Fatalf("read log: %v", err)
 	}
 	methods := strings.Split(strings.TrimRight(string(logData), "\n"), "\n")
-	// We expect exactly one method: thread/resume (turn/start
-	// doesn't appear in this run because thread/resume
-	// replaced it). Wait — actually we still issue turn/start
-	// AFTER thread/resume. So we expect: thread/resume, turn/start.
-	if len(methods) != 2 || methods[0] != "thread/resume" || methods[1] != "turn/start" {
-		t.Errorf("methods = %v, want [thread/resume, turn/start]", methods)
+	// codex 0.147+ prepends "initialize" + "initialized" to every session,
+	// so the first 2 log entries are the handshake, then thread/resume +
+	// turn/start. Find the index of the first thread/resume and verify
+	// the following entry is turn/start.
+	resumeIdx := -1
+	for i, m := range methods {
+		if m == "thread/resume" {
+			resumeIdx = i
+			break
+		}
+	}
+	if resumeIdx == -1 {
+		t.Fatalf("no thread/resume in log: %v", methods)
+	}
+	if resumeIdx+1 >= len(methods) || methods[resumeIdx+1] != "turn/start" {
+		t.Errorf("methods after thread/resume = %v, want [thread/resume, turn/start, ...]", methods[resumeIdx:])
+	}
+	for _, m := range methods {
+		if m == "thread/start" {
+			t.Errorf("unexpected thread/start in log: %v", methods)
+		}
 	}
 }
 

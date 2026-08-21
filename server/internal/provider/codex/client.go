@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Client is a single connection to a running `codex app-server`
@@ -118,7 +120,48 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 	go c.pumpStdout()
 	go c.pumpStderr()
 
+	// Handshake: codex 0.147+ requires `initialize` + `initialized`
+	// before any other call (returns -32600 "Not initialized"
+	// otherwise). We send both right after the pumps start so any
+	// notifications that arrive during init are visible on Events().
+	//
+	// Best-effort: if the subprocess doesn't respond (older codex
+	// or a test fake), we proceed anyway. Next Call will get -32600
+	// from codex 0.147+ if the handshake was actually required.
+	if err := c.initialize(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "warn: codex initialize handshake: %v (continuing; next Call may fail)\n", err)
+	}
+
 	return c, nil
+}
+
+// initialize performs the JSON-RPC handshake that codex 0.147+
+// requires before any other call. It blocks until the subprocess
+// responds (or until ctx is canceled). The `initialized` message
+// is a notification, so we send it after `initialize` and don't
+// wait for a response.
+//
+// We use a separate context with a short timeout (5s) so a
+// subprocess that doesn't implement the handshake (older codex,
+// or a test fake) doesn't block NewClient forever.
+func (c *Client) initialize(ctx context.Context) error {
+	params := map[string]any{
+		"clientInfo": map[string]any{
+			"name":    "conductor",
+			"version": "0.1.0",
+		},
+	}
+	initCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var resp map[string]any
+	if err := c.Call(initCtx, "initialize", params, &resp); err != nil {
+		return fmt.Errorf("initialize call: %w", err)
+	}
+	return c.writeJSON(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "initialized",
+		"params":  map[string]any{},
+	})
 }
 
 // Events returns the notification channel. Closes when the

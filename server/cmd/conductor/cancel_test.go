@@ -191,6 +191,11 @@ func TestCancelSubprocessHappyPath(t *testing.T) {
 while read -r REQ; do
   METHOD=$(printf '%s' "$REQ" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
   ID=$(printf '%s' "$REQ" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  if [ "$METHOD" = "initialize" ]; then
+    printf '%s\n' '{"jsonrpc":"2.0","id":'"$ID"',"result":{"userAgent":"Conductor test"}}'
+    printf '%s\n' '{"jsonrpc":"2.0","method":"initialized","params":{}}'
+    continue
+  fi
   case "$METHOD" in
     thread/start) printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":${ID},\"result\":{\"threadId\":\"thr-x\"}}";;
     turn/start) printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":${ID},\"result\":{\"ok\":true}}"; sleep 999;;

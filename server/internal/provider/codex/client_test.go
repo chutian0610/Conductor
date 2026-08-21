@@ -30,18 +30,8 @@ func TestClientCallRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Fake codex app-server: reads one line per request, writes one
-	// response with id=1 and one notification "item/agentMessage/delta".
-	fake := `#!/bin/sh
-read -r REQ
-# Pull the id out (very loose; real JSON parser would be safer).
-ID=$(echo "$REQ" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
-echo "{\"jsonrpc\":\"2.0\",\"id\":$ID,\"result\":{\"ok\":true}}"
-echo '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"text":"hi"}}'
-# Block on stdin so the client has time to consume.
-read -r _
-`
-	scriptPath := writeFake(t, fake)
+	// v2 fake: handles initialize handshake; default case is "ok" + notification.
+	scriptPath := writeCodexFakeV2(t, "")
 
 	c, err := NewClient(ctx, ClientConfig{
 		Bin: "/bin/sh",
@@ -64,18 +54,23 @@ read -r _
 		t.Errorf("result.OK = false, want true (result=%+v)", result)
 	}
 
-	// The notification should arrive on Events() within a short
-	// window.
-	select {
-	case ev, ok := <-c.Events():
-		if !ok {
-			t.Fatalf("events channel closed before notification")
+	// Drain events until we see the expected notification. Earlier
+	// events (e.g. "initialized" from the handshake, or codex-side
+	// configWarning notifications) are skipped.
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev, ok := <-c.Events():
+			if !ok {
+				t.Fatalf("events channel closed before notification")
+			}
+			if ev["method"] == "item/agentMessage/delta" {
+				return // success
+			}
+			// Skip other events.
+		case <-deadline:
+			t.Fatalf("did not receive item/agentMessage/delta within 2s")
 		}
-		if got := ev["method"]; got != "item/agentMessage/delta" {
-			t.Errorf("notification method = %v, want item/agentMessage/delta", got)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatalf("did not receive notification within 2s")
 	}
 }
 
@@ -89,8 +84,9 @@ func TestClientCloseIdempotent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Fake server that exits immediately.
-	scriptPath := writeFake(t, "#!/bin/sh\nexit 0\n")
+	// v2 fake: handles initialize + initialized, then auto-exits so we
+	// test Close idempotency (not the handshake).
+	scriptPath := writeCodexFakeV2(t, "    *)\n      # Exit immediately so Close is called against a\n      # dead subprocess (testing idempotency, not the handshake).\n      exit 0\n      ;;")
 
 	c, err := NewClient(ctx, ClientConfig{
 		Bin: "/bin/sh",

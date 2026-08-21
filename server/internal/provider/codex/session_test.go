@@ -38,6 +38,13 @@ while read -r REQ; do
   METHOD=$(printf '%s' "$REQ" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
   ID=$(printf '%s' "$REQ" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
   [ -n "$CONDUCTOR_FAKE_LOG" ] && printf '%s\n' "$METHOD" >> "$CONDUCTOR_FAKE_LOG"
+  if [ "$METHOD" = "initialize" ]; then
+    printf '%s
+' '{"jsonrpc":"2.0","id":'"$ID"',"result":{"userAgent":"Conductor test"}}'
+    printf '%s
+' '{"jsonrpc":"2.0","method":"initialized","params":{}}'
+    continue
+  fi
   case "$METHOD" in
     thread/start)
       echo "{\"jsonrpc\":\"2.0\",\"id\":${ID},\"result\":{\"threadId\":\"thr-fake\"}}"
@@ -214,8 +221,25 @@ func TestSessionResume(t *testing.T) {
 	}
 
 	methods := readMethodLog(t, logPath)
-	if len(methods) == 0 || methods[0] != "thread/resume" {
-		t.Errorf("first method = %v, want thread/resume", methods)
+	// codex 0.147+ prepends an "initialize" + "initialized" handshake
+	// to every session, so the first 2 entries are those, then the
+	// resume starts. Find the index of the first "thread/resume".
+	resumeIdx := -1
+	for i, m := range methods {
+		if m == "thread/resume" {
+			resumeIdx = i
+			break
+		}
+	}
+	if resumeIdx == -1 {
+		t.Fatalf("no thread/resume in log: %v", methods)
+	}
+	// And we must NOT see thread/start (would mean a fresh thread
+	// instead of resuming).
+	for _, m := range methods {
+		if m == "thread/start" {
+			t.Errorf("unexpected thread/start in log: %v", methods)
+		}
 	}
 }
 
@@ -321,6 +345,13 @@ func TestSessionConcurrentSendRejected(t *testing.T) {
 while read -r REQ; do
   METHOD=$(printf '%s' "$REQ" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
   ID=$(printf '%s' "$REQ" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  if [ "$METHOD" = "initialize" ]; then
+    printf '%s
+' '{"jsonrpc":"2.0","id":'"$ID"',"result":{"userAgent":"Conductor test"}}'
+    printf '%s
+' '{"jsonrpc":"2.0","method":"initialized","params":{}}'
+    continue
+  fi
   case "$METHOD" in
     thread/start) echo "{\"jsonrpc\":\"2.0\",\"id\":${ID},\"result\":{\"threadId\":\"thr-fake\"}}";;
     turn/start) echo "{\"jsonrpc\":\"2.0\",\"id\":${ID},\"result\":{\"ok\":true}}";;
@@ -380,6 +411,13 @@ func TestSessionUnknownNotificationSkipped(t *testing.T) {
 while read -r REQ; do
   METHOD=$(printf '%s' "$REQ" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
   ID=$(printf '%s' "$REQ" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  if [ "$METHOD" = "initialize" ]; then
+    printf '%s
+' '{"jsonrpc":"2.0","id":'"$ID"',"result":{"userAgent":"Conductor test"}}'
+    printf '%s
+' '{"jsonrpc":"2.0","method":"initialized","params":{}}'
+    continue
+  fi
   case "$METHOD" in
     thread/start) echo "{\"jsonrpc\":\"2.0\",\"id\":${ID},\"result\":{\"threadId\":\"thr-fake\"}}";;
     turn/start)
